@@ -1,0 +1,48 @@
+{
+  "name": "@olorinm/agent-connectors",
+  "version": "0.1.0-alpha.1",
+  "description": "Business connectors for Agents: credentials, server-side authorization and approval-bound writes behind MCP",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Olorinm/agent-connectors.git"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "README.zh-CN.md",
+    "docs"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./issuer": {
+      "types": "./dist/issuer.d.ts",
+      "import": "./dist/issuer.js"
+    }
+  },
+  "bin": {
+    "agent-connectors": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "jose": "^6.2.12",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
