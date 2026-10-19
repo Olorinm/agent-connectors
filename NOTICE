@@ -1,0 +1,7 @@
+Agent Connectors
+Copyright 2026 Agent Connectors contributors
+
+src/connectors/feishu/account.ts is adapted from Agent Router
+(https://github.com/Olorinm/agent-router), MIT License, Copyright (c) 2026 Agent Router contributors.
+
+The Feishu connector runs the official @larksuite/cli binary (MIT License, Lark Technologies).

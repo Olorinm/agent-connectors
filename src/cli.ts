@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { builtinConnectors } from "./connectors/index.js";
 import { generateSigningKey } from "./issuer.js";
@@ -24,7 +24,8 @@ function option(args: string[], name: string) {
 const [command, ...args] = process.argv.slice(2);
 switch (command) {
   case "serve": {
-    const started = await start(loadConfig(option(args, "--config")), builtinConnectors);
+    const file = option(args, "--config"), config = loadConfig(file);
+    const started = await start(config, builtinConnectors({ baseDirectory: dirname(resolve(file)), stateDirectory: config.stateDirectory }));
     console.log(JSON.stringify({ event: "listening", url: started.url }));
     const stop = () => void started.close().then(() => process.exit(0));
     process.once("SIGTERM", stop);

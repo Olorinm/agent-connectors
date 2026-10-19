@@ -10,4 +10,6 @@
 
 分工：Router 负责身份、入口和审批展示，并签发令牌；本服务保管凭证、执行授权检查、执行操作；Host 只拿到 MCP 地址和调用令牌。飞书和邮件的消息收发属于入口，留在 Router；日历、文档、邮箱读写、报销这类业务工具放在本仓库。
 
+已有连接器：[飞书](docs/feishu.md)。底层调用官方 lark-cli，以 owner 身份执行；读写由 lark-cli 官方为每条命令声明的风险等级决定。
+
 详见 [安全模型](docs/security-model.md) 和 [Router 对接](docs/router-integration.md)。

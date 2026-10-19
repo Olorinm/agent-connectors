@@ -16,7 +16,7 @@ Owner's trusted device ─▶ Router ─approval grant─────┘
 - **Narrow pre-approval.** A connection can pre-approve a write tool for exact argument values (for example, appending to one invoice table).
 - **Uncertain outcomes are not retried.** An unexpected failure during a write is recorded as `uncertain`.
 
-See [docs/security-model.md](docs/security-model.md) and [docs/router-integration.md](docs/router-integration.md).
+See [docs/security-model.md](docs/security-model.md), [docs/router-integration.md](docs/router-integration.md) and [docs/feishu.md](docs/feishu.md).
 
 ## Components
 
@@ -62,6 +62,10 @@ Store a connection's credentials from stdin: `agent-connectors credential set wo
 
 Programmatic use: `start(loadConfig(file), connectors)` from `@olorinm/agent-connectors`; token issuance for Router from `@olorinm/agent-connectors/issuer`.
 
+## Connectors
+
+- [Feishu](docs/feishu.md): the official lark-cli as the owner; the CLI's own risk declaration decides read vs write.
+
 ## Status
 
-`0.1.0-alpha.1`: authorization, approval, credential sealing and MCP transport. No built-in connector yet; Feishu tools move here from Router next, then mail.
+`0.1.0-alpha.1`: authorization, approval, credential sealing, MCP transport and the Feishu connector. Next: Router issues tokens and presents approvals, then mail.

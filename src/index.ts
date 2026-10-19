@@ -7,3 +7,4 @@ export { createHttpServer, type HttpOptions } from "./server.js";
 export { Store, type OperationStatus } from "./store.js";
 export { LIMITS, TOKEN_TYPES, TokenError, TokenVerifier, type Caller, type Grant, type Trust } from "./tokens.js";
 export { start, type Started } from "./start.js";
+export { builtinConnectors, feishuConnector, type FeishuOptions } from "./connectors/index.js";
