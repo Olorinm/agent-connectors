@@ -56,14 +56,16 @@ confirmation required) are `failed`; any other failure of a write is `uncertain`
 { "id": "work-feishu", "kind": "feishu", "owner": "@alice:router.example", "settings": { "directory": "feishu/alice" } }
 ```
 
-`directory` (relative to the configuration file) is the private directory created by Router's
-`npm run feishu:setup` — `credentials.json`, `app-secret`, `lark-cli/`, `cli-data/`. An existing Router directory
-can be moved here unchanged; afterwards remove `personalTools` from Router's channel connection.
+`directory` contains `credentials.json`, `app-secret`, `lark-cli/`, and `cli-data/`.
+In production it is relative to the encrypted `secretFiles` bundle's private runtime directory.
+In local development without `secretFiles`, it is relative to the configuration file.
+`credentials.json` must reference the app secret with a relative path inside the account directory.
 
-Storage note: lark-cli keeps the app secret and the owner's OAuth tokens in that directory itself, protected by
-file permissions (0700/0600) on the connector host, not by this service's sealing key. The directory must never
-be reachable from an Agent environment. The same Feishu app also serves Router's bot channel, so Router keeps
-its own copy of the app secret; the owner's personal tokens live only here.
+The official CLI reads ordinary private files at runtime. With production `secretFiles`, those files live
+on tmpfs and are saved as a KMS-protected encrypted bundle after each operation, including token refresh.
+See [production encryption](security-model.md#production-encryption) for import and recovery.
+The directory must never be reachable from an Agent environment. If the same Feishu app also serves
+Router's bot channel, Router has its own app-secret storage, which needs separate protection.
 
 Authorization: when the owner has not authorized (or a scope is missing), tools fail with
 `feishu_personal_authorization_required` and the official consent URL; the next call completes a pending

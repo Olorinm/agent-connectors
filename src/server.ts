@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ServiceError, type CallOutcome, type ConnectorService } from "./service.js";
 import { TokenError, type Caller, type TokenVerifier } from "./tokens.js";
+import { ConnectorError } from "./connector.js";
 
 export interface HttpOptions {
   service: ConnectorService;
@@ -27,8 +28,8 @@ const MAX_BODY = 1_000_000;
 export function createHttpServer(options: HttpOptions): HttpServer {
   return createServer((request, response) => {
     handle(options, request, response).catch((error) => {
-      const status = error instanceof ServiceError ? error.status : error instanceof TokenError ? 401 : error instanceof HttpError ? error.status : 500;
-      const code = error instanceof ServiceError || error instanceof TokenError || error instanceof HttpError ? error.message : "internal_error";
+      const status = error instanceof ServiceError ? error.status : error instanceof TokenError ? 401 : error instanceof HttpError ? error.status : error instanceof ConnectorError ? 400 : 500;
+      const code = error instanceof ServiceError || error instanceof TokenError || error instanceof HttpError || error instanceof ConnectorError ? error.message : "internal_error";
       if (!response.headersSent) reply(response, status, { error: code });
       else response.end();
     });
@@ -41,7 +42,24 @@ async function handle(options: HttpOptions, request: IncomingMessage, response: 
   if (options.allowedHosts && !options.allowedHosts.includes(request.headers.host ?? "")) throw new HttpError(403, "host_not_allowed");
   const url = new URL(request.url ?? "/", "http://connectors.invalid");
   const path = url.pathname.split("/").filter(Boolean);
+  if (url.pathname === "/oauth/callback" && request.method === "GET") {
+    const state = url.searchParams.get("state"), code = url.searchParams.get("code");
+    if (!state || state.length > 256 || (code && code.length > 4096) ||
+      url.searchParams.getAll("state").length !== 1 || url.searchParams.getAll("code").length > 1 ||
+      (!code && !url.searchParams.has("error"))) throw new HttpError(400, "oauth_callback_invalid");
+    response.setHeader("Referrer-Policy", "no-referrer");
+    await options.service.oauthCallback(state, code ?? undefined, AbortSignal.timeout(60_000));
+    return reply(response, 200, { status: code ? "authorized" : "authorization_cancelled", message: "Return to Mau and check the connection status." });
+  }
   if (url.pathname === "/v1/health" && request.method === "GET") return reply(response, 200, { ok: true });
+  if (path[0] === "v1" && path[1] === "connections") {
+    await options.tokens.service(bearer(request));
+    const signal = AbortSignal.timeout(60_000);
+    if (path.length === 2 && request.method === "GET") return reply(response, 200, { connections: await options.service.connections(signal) });
+    if (path.length === 3 && request.method === "GET") return reply(response, 200, await options.service.account(path[2]!, "status", signal));
+    if (path.length === 4 && request.method === "POST" && ["connect", "disconnect"].includes(path[3]!))
+      return reply(response, 200, await options.service.account(path[2]!, path[3] as "connect" | "disconnect", signal));
+  }
   if (url.pathname === "/mcp") {
     if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");
     const caller = await options.tokens.caller(bearer(request));
@@ -58,9 +76,9 @@ async function handle(options: HttpOptions, request: IncomingMessage, response: 
       return reply(response, 200, await options.service.approve(verified, AbortSignal.timeout(120_000)));
     }
     await options.tokens.service(bearer(request));
-    if (path.length === 2 && request.method === "GET") return reply(response, 200, { operations: options.service.pending() });
+    if (path.length === 2 && request.method === "GET") return reply(response, 200, { operations: await options.service.pending() });
     if (path.length === 3 && request.method === "GET") {
-      const view = options.service.operation(id!);
+      const view = await options.service.operation(id!);
       if (!view) throw new ServiceError("operation_not_found", 404);
       return reply(response, 200, view);
     }
@@ -74,12 +92,13 @@ async function handle(options: HttpOptions, request: IncomingMessage, response: 
 
 async function mcp(options: HttpOptions, caller: Caller, request: IncomingMessage, response: ServerResponse, parsed: unknown) {
   const server = new Server({ name: "agent-connectors", version: options.version ?? "0.1.0" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: options.service.tools(caller).map((tool) => ({
+  server.setRequestHandler(ListToolsRequestSchema, async (_request, extra) => {
+    await options.service.prepare(caller, extra.signal);
+    return { tools: options.service.tools(caller).map((tool) => ({
       name: tool.name, description: tool.description, inputSchema: tool.inputSchema as { type: "object" },
       annotations: tool.risk === "read" ? { readOnlyHint: true } : { readOnlyHint: false, destructiveHint: true },
-    })),
-  }));
+    })) };
+  });
   server.setRequestHandler(CallToolRequestSchema, async (call, extra) => {
     // Internal errors reach the Agent only as a code, never as a message.
     const outcome = await options.service.call(caller, call.params.name, call.params.arguments, extra.signal)

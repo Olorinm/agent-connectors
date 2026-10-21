@@ -54,7 +54,7 @@ async function feishu(t, options) {
   const service = new ConnectorService({ connectors: [connector], store: s.store, sealer: new Sealer(s.sealingKey),
     connections: [{ id: "work-feishu", kind: "feishu", owner: "@alice", settings: { directory: "feishu" } }] });
   const call = (tool, args, files) => service.call(alice, `work_feishu__${tool}`, { args, ...(files ? { files } : {}) }, signal());
-  const approve = async (pending) => service.approve(await s.verifier.grant(await s.grant(service.operation(pending.operationId))), signal());
+  const approve = async (pending) => service.approve(await s.verifier.grant(await s.grant((await service.operation(pending.operationId)))), signal());
   return { ...s, cli, service, call, approve, accountConfig: join(directory, "lark-cli") };
 }
 
@@ -72,6 +72,20 @@ test("reads run as the owner, classified by an unconfigured CLI, in a temporary 
   assert.deepEqual(run.args, ["mail", "--profile=cli_app", "--as=user", "+triage", "--query", "发票"]);
   assert.equal(run.configDir, f.accountConfig);
   assert.ok(!existsSync(run.cwd), "per-call directory is removed");
+});
+
+test("Feishu account management uses the official device flow and cancels pending writes on disconnect", async (t) => {
+  const f = await feishu(t, { authorized: false });
+  const linked = await f.service.account("work-feishu", "connect", signal());
+  assert.equal(linked.status, "authorization_required");
+  assert.equal(linked.authorizationUrl, "https://open.feishu.cn/consent");
+  const pending = await f.call("cli_write", ["mail", "+send", "--to", "a@b.c", "--confirm-send"]);
+  assert.equal(pending.status, "approval_required");
+  assert.equal((await f.service.account("work-feishu", "disconnect", signal())).status, "disconnected");
+  assert.equal((await f.service.operation(pending.operationId)).status, "denied");
+  assert.ok(f.cli.calls.some((call) => call.args[0] === "auth" && call.args.includes("logout")));
+  assert.equal(existsSync(join(f.directory, "feishu", "authorization.json")), false);
+  assert.deepEqual(f.cli.executed(), []);
 });
 
 test("the read tool refuses write, high-risk and unknown commands without running them", async (t) => {

@@ -25,7 +25,7 @@ test("reads run directly; writes wait for a grant and run exactly once", async (
   assert.equal(pending.status, "approval_required");
   assert.equal(pending.summary, 'Send "hi" to carol');
   assert.equal(s.effects.length, 0);
-  const view = s.service.operation(pending.operationId);
+  const view = (await s.service.operation(pending.operationId));
   assert.deepEqual(view.input, { text: "hi", to: "carol" });
   const grant = await s.verifier.grant(await s.grant(view));
   assert.deepEqual(await s.service.approve(grant, signal()), { status: "completed", result: { sent: true }, operationId: view.id });
@@ -42,7 +42,7 @@ test("reads run directly; writes wait for a grant and run exactly once", async (
 test("a grant must match the operation's owner and digest, and is single use", async (t) => {
   const s = await setup(); t.after(s.cleanup);
   const pending = await s.service.call(alice, "alice_notes__send", { to: "carol", text: "hi" }, signal());
-  const view = s.service.operation(pending.operationId);
+  const view = (await s.service.operation(pending.operationId));
   const wrongDigest = await s.verifier.grant(await s.grant({ ...view, digest: "0".repeat(64) }));
   await assert.rejects(s.service.approve(wrongDigest, signal()), { message: "grant_does_not_match_operation" });
   const wrongOwner = await s.verifier.grant(await s.grant({ ...view, owner: "@bob" }));
@@ -58,7 +58,7 @@ test("token kinds and keys are not interchangeable", async (t) => {
   const caller = await s.verifier.caller(await s.callerToken());
   assert.equal(caller.owner, "@alice");
   const pending = await s.service.call(caller, "alice_notes__send", { to: "carol", text: "hi" }, signal());
-  const view = s.service.operation(pending.operationId);
+  const view = (await s.service.operation(pending.operationId));
   // A grant signed with the caller key (the key closest to Agents) is rejected.
   const forged = await s.grant(view, { key: s.callerKey });
   await assert.rejects(s.verifier.grant(forged), { message: "grant_token_invalid" });
@@ -92,14 +92,14 @@ test("pending operations expire and can be denied", async (t) => {
   let clock = Date.parse("2026-10-19T00:00:00Z");
   const s = await setup({ now: () => new Date(clock), ttl: 60 }); t.after(s.cleanup);
   const first = await s.service.call(alice, "alice_notes__send", { to: "carol", text: "1" }, signal());
-  const view = s.service.operation(first.operationId);
+  const view = (await s.service.operation(first.operationId));
   const grant = await s.verifier.grant(await s.grant(view));
   clock += 61_000;
   await assert.rejects(s.service.approve(grant, signal()), { message: "operation_expired" });
   const second = await s.service.call(alice, "alice_notes__send", { to: "carol", text: "2" }, signal());
   s.service.deny(second.operationId);
-  assert.equal(s.service.operation(second.operationId).status, "denied");
-  assert.deepEqual(s.service.pending(), []);
+  assert.equal((await s.service.operation(second.operationId)).status, "denied");
+  assert.deepEqual((await s.service.pending()), []);
   assert.equal(s.effects.length, 0);
 });
 
@@ -107,7 +107,7 @@ test("known failures fail; unknown write failures are uncertain and survive rest
   const s = await setup(); t.after(s.cleanup);
   const approve = async (input) => {
     const pending = await s.service.call(alice, "alice_notes__send", input, signal());
-    const view = s.service.operation(pending.operationId);
+    const view = (await s.service.operation(pending.operationId));
     return s.service.approve(await s.verifier.grant(await s.grant(view)), signal());
   };
   assert.partialDeepStrictEqual(await approve({ to: "fail", text: "x" }), { status: "failed", error: "recipient_rejected" });
@@ -145,17 +145,17 @@ test("auto-approved writes are recorded, and an uncertain one is not repeated wi
   const s = await setup(); t.after(s.cleanup);
   const first = await s.service.call(alice, "alice_notes__send", { to: "invoice-crash", text: "row" }, signal());
   assert.equal(first.status, "uncertain");
-  assert.equal(s.service.operation(first.operationId).status, "uncertain");
+  assert.equal((await s.service.operation(first.operationId)).status, "uncertain");
   const again = await s.service.call(alice, "alice_notes__send", { to: "invoice-crash", text: "row" }, signal());
   assert.equal(again.status, "approval_required");
   const ok = await s.service.call(alice, "alice_notes__send", { to: "invoice-table", text: "row" }, signal());
-  assert.equal(s.service.operation(ok.operationId).status, "completed");
+  assert.equal((await s.service.operation(ok.operationId)).status, "completed");
 });
 
 test("what executes is exactly what was approved, even with transforming schemas", async (t) => {
   const s = await setup(); t.after(s.cleanup);
   const pending = await s.service.call(alice, "alice_notes__subject", { subject: "Hi" }, signal());
-  const view = s.service.operation(pending.operationId);
+  const view = (await s.service.operation(pending.operationId));
   assert.deepEqual(view.input, { subject: "Re: Hi" });
   await s.service.approve(await s.verifier.grant(await s.grant(view)), signal());
   assert.deepEqual(s.effects, [{ subject: "Re: Hi" }]);
@@ -167,7 +167,7 @@ test("tampering with any stored operation column blocks execution", async (t) =>
   const s = await setup(); t.after(s.cleanup);
   for (const [column, value] of [["connection_id", "bob-notes"], ["tool", "subject"], ["agent_id", "agent-x"], ["owner", "@bob"]]) {
     const pending = await s.service.call(alice, "alice_notes__send", { to: "carol", text: column }, signal());
-    const view = s.service.operation(pending.operationId);
+    const view = (await s.service.operation(pending.operationId));
     const grant = await s.verifier.grant(await s.grant(view));
     s.store.db.prepare(`UPDATE operations SET ${column} = ? WHERE id = ?`).run(value, view.id);
     await assert.rejects(s.service.approve(grant, signal()), (error) => ["operation_integrity_failed", "grant_does_not_match_operation"].includes(error.message), column);
@@ -178,7 +178,7 @@ test("tampering with any stored operation column blocks execution", async (t) =>
 test("a pending write cannot run after its connection moved to another owner", async (t) => {
   const s = await setup(); t.after(s.cleanup);
   const pending = await s.service.call(alice, "alice_notes__send", { to: "carol", text: "x" }, signal());
-  const view = s.service.operation(pending.operationId);
+  const view = (await s.service.operation(pending.operationId));
   const moved = s.connections.map((c) => c.id === "alice-notes" ? { ...c, owner: "@bob" } : c);
   const service = new ConnectorService({ connectors: [s.connector], connections: moved, store: s.store, sealer: new Sealer(s.sealingKey) });
   await assert.rejects(service.approve(await s.verifier.grant(await s.grant(view)), signal()), { message: "connection_unavailable" });

@@ -28,6 +28,8 @@ export interface FeishuOptions {
   baseDirectory?: string;
   /** Private directory for the unconfigured CLI used to classify commands; defaults to a temporary one. */
   classifierDirectory?: string;
+  /** Serialize and persist official CLI files in the encrypted runtime file store. */
+  withSecretFiles?: <T>(operation: () => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -35,6 +37,7 @@ export interface FeishuOptions {
  * Risk comes from the CLI's own per-command declaration: only commands it marks `read` run without approval.
  */
 export function feishuConnector(options: FeishuOptions = {}): Connector {
+  const withSecrets = options.withSecretFiles ?? (<T>(operation: () => Promise<T>) => operation());
   const accounts = new Map<string, FeishuAccount>();
   const account = (connection: ConnectionConfig) => {
     let existing = accounts.get(connection.id);
@@ -67,7 +70,7 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
       if (risk !== "read") throw new ConnectorError("feishu_command_requires_write_tool", { command, risk: risk ?? "unknown" });
       const plan = await cli().plan(value.args);
       if (!plan.readOnly) throw new ConnectorError("feishu_command_requires_write_tool", { command, risk, requests: plan.requests });
-      return run(account(connection), value, { write: false });
+      return withSecrets(() => run(account(connection), value, { write: false }));
     },
   };
   const write: ToolDefinition<Input> = {
@@ -81,10 +84,31 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
       // The owner approved these exact arguments, so a high-risk command receives its confirmation here.
       const { risk } = await cli().classify(value.args);
       const flags = risk === "high-risk-write" && !value.args.includes("--yes") ? ["--yes=true"] : [];
-      return run(account(connection), value, { write: true, flags });
+      return withSecrets(() => run(account(connection), value, { write: true, flags }));
     },
   };
-  return { kind: "feishu", tools: [read, write] };
+  return { kind: "feishu", tools: [read, write], account: {
+    async status({ connection }): Promise<Json> {
+      return withSecrets(async (): Promise<Json> => {
+      let feishu: FeishuAccount;
+      try { feishu = account(connection); }
+      catch { return { status: "feishu_configuration_required", required: ["directory/credentials.json", "appSecretFile", "ownerOpenId"] }; }
+      await feishu.pollAuthorization();
+      const status = await feishu.status(true);
+      return { ...status, status: status.authorized && status.verified ? "connected" : status.status };
+      });
+    },
+    async connect({ connection }) {
+      return withSecrets(async () => {
+      let feishu: FeishuAccount;
+      try { feishu = account(connection); }
+      catch { throw new ConnectorError("feishu_configuration_required"); }
+      const result = await feishu.begin();
+      return { status: "authorization_required", authorizationUrl: result.verificationUrl, expiresAt: result.expiresAt };
+      });
+    },
+    async disconnect({ connection }) { return withSecrets(() => account(connection).disconnect()); },
+  } };
 }
 
 function check(args: string[]) {

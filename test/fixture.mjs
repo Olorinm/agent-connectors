@@ -18,7 +18,7 @@ export function recordingConnector() {
       kind: "notes",
       tools: [
         { name: "list", description: "List notes.", risk: "read", input: z.object({}).strict(),
-          execute: async ({ credentials }) => ({ notes: ["a"], token: credentials.get()?.token ?? null }) },
+          execute: async ({ credentials }) => ({ notes: ["a"], token: (await credentials.get())?.token ?? null }) },
         { name: "subject", description: "Write with a transforming schema.", risk: "write",
           input: z.object({ subject: z.string().overwrite((v) => `Re: ${v}`) }).strict(),
           execute: async (_context, input) => { effects.push(input); return { ok: true }; } },

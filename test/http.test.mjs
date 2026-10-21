@@ -15,7 +15,7 @@ async function boot(t) {
   file("caller.jwks.json", JSON.stringify(s.trust.callerKeys));
   file("authority.jwks.json", JSON.stringify(s.trust.authorityKeys));
   file("config.json", JSON.stringify({
-    listen: { host: "127.0.0.1", port: 0 }, stateDirectory: "http-state", keyFile: "sealing.key",
+    listen: { host: "127.0.0.1", port: 0 }, stateDirectory: "http-state", encryption: { provider: "development-file", keyFile: "sealing.key" },
     trust: { issuer: s.trust.issuer, audience: s.trust.audience, callerKeys: "caller.jwks.json", authorityKeys: "authority.jwks.json" },
     connections: s.connections,
   }));

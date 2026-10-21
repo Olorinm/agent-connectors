@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync,
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { secretPath } from "../../secret-files.js";
 
 export const feishuCredentialsSchema = z.object({ version: z.literal(1), appId: z.string().min(1),
   appSecretFile: z.string().min(1), domain: z.enum(["feishu", "lark"]), ownerOpenId: z.string().min(1) }).strict();
@@ -17,6 +18,7 @@ export function privateFile(path: string, value: unknown): void {
 }
 export function loadFeishuCredentials(path: string) {
   const credentials = feishuCredentialsSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+  secretPath(credentials.appSecretFile);
   const directory = dirname(resolve(path));
   const appSecret = readFileSync(resolve(directory, credentials.appSecretFile), "utf8").trim();
   if (!appSecret) throw new Error("empty_feishu_app_secret");
@@ -65,6 +67,10 @@ export class FeishuAccount {
     const config = JSON.parse(readFileSync(configFile, "utf8"));
     if (config.apps?.length !== 1 || config.apps[0]?.appId !== credentials.appId || config.apps[0]?.brand !== credentials.domain)
       throw new Error("feishu_cli_application_mismatch");
+    // A restored encrypted bundle has a new private runtime path on each start.
+    secretPath(credentials.appSecretFile);
+    config.apps[0].appSecret = { source: "file", id: resolve(this.directory, credentials.appSecretFile) };
+    privateFile(configFile, config);
   }
   command(args: string[], timeout = 30_000, cwd = this.workspace): Promise<CliResult> {
     const operation = this.queue.then(() => {
@@ -110,6 +116,14 @@ export class FeishuAccount {
     return { verificationUrl: pending.verificationUrl, expiresAt: new Date(pending.expiresAt).toISOString() };
   }
   complete() { return this.authorize(() => this.completeAuthorization()); }
+  disconnect() {
+    return this.authorize(async () => {
+      const result = await this.command(["auth", "logout", "--json"]);
+      if (result.code !== 0) throw new Error("feishu_logout_failed");
+      this.clearPending();
+      return { status: "disconnected" };
+    });
+  }
   private async completeAuthorization() {
     const current = await this.status(true);
     if (current.authorized && current.verified) { this.clearPending(); return current; }

@@ -20,9 +20,9 @@ export interface ConnectionConfig {
 }
 
 export interface Credentials {
-  get(): Json | undefined;
+  get(): Json | undefined | Promise<Json | undefined>;
   /** Persists rotated tokens (e.g. OAuth refresh). */
-  put(value: Json): void;
+  put(value: Json): void | Promise<void>;
 }
 
 export interface ToolContext {
@@ -36,6 +36,10 @@ export interface ToolDefinition<Input = any> {
   description: string;
   risk: Risk;
   input: z.ZodType<Input>;
+  /** Original upstream schema; input must validate it without transforming arguments. */
+  inputSchema?: Record<string, unknown>;
+  /** Binds pending approvals to an account generation and upstream tool definition. */
+  version?: string;
   /**
    * Top-level arguments that decide where a write lands (table, mailbox, recipient).
    * autoApprove rules must pin all of them; a write without targets cannot be pre-approved.
@@ -50,6 +54,14 @@ export interface ToolDefinition<Input = any> {
 export interface Connector {
   kind: string;
   tools: ToolDefinition[];
+  discover?(context: ToolContext): Promise<ToolDefinition[]>;
+  account?: {
+    status(context: ToolContext): Promise<Json>;
+    connect(context: ToolContext): Promise<Json>;
+    disconnect(context: ToolContext): Promise<Json>;
+    /** Returns false for a state belonging to another connection. */
+    callback?(context: ToolContext, state: string, code?: string): Promise<boolean>;
+  };
 }
 
 /** A known failure: the operation did not take effect. Other exceptions are treated as uncertain. */

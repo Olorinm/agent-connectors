@@ -1,0 +1,49 @@
+{
+  "name": "agent-connectors-reader",
+  "main": "./src/index.ts",
+  "compatibility_date": "2026-10-20",
+  "compatibility_flags": [
+    "enable_request_signal"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    }
+  },
+  "containers": [
+    {
+      "class_name": "TrustedReader",
+      "scheduling_policy": "durable_object"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "READERS",
+        "class_name": "TrustedReader"
+      }
+    ]
+  },
+  "exports": {
+    "TrustedReader": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "r2_buckets": [
+    {
+      "binding": "ARTIFACTS",
+      "bucket_name": "YOUR-PRIVATE-ARTIFACT-BUCKET"
+    }
+  ],
+  "vars": {
+    "PRINCIPAL": "{\"agentId\": \"example-agent\", \"owner\": \"@alice:example.test\"}",
+    "PACKAGE_KEY": "artifacts/YOUR-VERIFIED-CONNECTOR-PACKAGE.tgz",
+    "PACKAGE_SHA256": "YOUR-PACKAGE-SHA256",
+    "SOURCE_REVISION": "YOUR-COMMIT-SHA"
+  }
+}

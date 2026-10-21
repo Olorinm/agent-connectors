@@ -1,4 +1,6 @@
 node_modules
+keys/
+secrets/
 dist/
 coverage/
 *.tgz
@@ -7,3 +9,7 @@ coverage/
 .DS_Store
 .local/
 state/
+.wrangler/
+.dev.vars*
+__pycache__/
+*.py[cod]

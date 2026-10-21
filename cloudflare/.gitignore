@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+.dev.vars*
+dist/
+worker-configuration.d.ts
+__pycache__/
+*.py[cod]
+wrangler.json
+wrangler.jsonc
+!wrangler.example.jsonc
