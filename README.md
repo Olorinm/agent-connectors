@@ -67,7 +67,11 @@ The example and `init` use a development key and must bind to loopback. Producti
 `encryption.provider: "google-cloud-kms"` with a key resource name and a projected workload identity token;
 see [the encryption configuration](docs/security-model.md#production-encryption).
 
-Programmatic use: `start(loadConfig(file), connectors)` from `@olorinm/agent-connectors`; token issuance for Router from `@olorinm/agent-connectors/issuer`.
+Programmatic use: `startConfigured(file)` starts the built-in connectors with the same encrypted application-file lifecycle as the CLI. `start(loadConfig(file), connectors)` accepts custom connectors. Token issuance is available from `@olorinm/agent-connectors/issuer`.
+
+`@olorinm/agent-connectors/read-client` provides `ConnectorReadClient` for a trusted product server. It uses the official MCP SDK and short-lived, signed `readOnly` caller tokens. The service refuses writes for these tokens even when a connection has pre-approval rules. The composing product must bind every call to its authenticated owner, Agent and assigned connections; the browser and Agent receive neither the signing key nor tokens.
+
+An explicit `cloudflare-worker-secrets` encryption option is also available; see [remote key wrapping](docs/security-model.md#cloudflare-remote-key-wrapping). This uses a separate Worker deployment and is not non-exportable KMS.
 
 ## Connectors
 

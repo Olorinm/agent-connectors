@@ -1,6 +1,6 @@
 {
   "name": "@olorinm/agent-connectors",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Business connectors for Agents: credentials, server-side authorization and approval-bound writes behind MCP",
   "type": "module",
   "license": "MIT",
@@ -23,6 +23,10 @@
     "@larksuite/cli@1.0.97": true
   },
   "exports": {
+    "./read-client": {
+      "types": "./dist/read-client.d.ts",
+      "import": "./dist/read-client.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

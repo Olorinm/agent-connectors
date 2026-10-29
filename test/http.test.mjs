@@ -5,7 +5,7 @@ import test from "node:test";
 import { randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { loadConfig, start } from "../dist/index.js";
+import { loadConfig, start, startConfigured } from "../dist/index.js";
 import { setup } from "./fixture.mjs";
 
 async function boot(t) {
@@ -83,4 +83,23 @@ test("config refuses a sealing key readable by other users", async (t) => {
   writeFileSync(join(s.directory, "loose.key"), randomBytes(32).toString("base64"), { mode: 0o644 });
   const { readSealingKey } = await import("../dist/index.js");
   assert.throws(() => readSealingKey(join(s.directory, "loose.key")), /sealing_key_file_must_be_private/);
+});
+
+test("configured composition starts and closes built-ins and requires encrypted production application files", async t => {
+  const s = await setup(); t.after(s.cleanup);
+  writeFileSync(join(s.directory, "key"), randomBytes(32).toString("base64"), { mode: 0o600 });
+  writeFileSync(join(s.directory, "caller.json"), JSON.stringify(s.trust.callerKeys));
+  writeFileSync(join(s.directory, "authority.json"), JSON.stringify(s.trust.authorityKeys));
+  const config = { listen: { host: "127.0.0.1", port: 0 }, stateDirectory: "configured", encryption: { provider: "development-file", keyFile: "key" },
+    trust: { issuer: s.trust.issuer, callerKeys: "caller.json", authorityKeys: "authority.json" }, connections: [] };
+  const file = join(s.directory, "configured.json");
+  writeFileSync(file, JSON.stringify(config));
+  const started = await startConfigured(file);
+  assert.equal((await fetch(started.url + "/v1/health")).status, 200);
+  await started.close();
+  await assert.rejects(fetch(started.url + "/v1/health"));
+  config.encryption = { provider: "cloudflare-worker-secrets", url: "https://vault.example/", keyId: "key1", tokenFile: "token" };
+  config.connections = [{ id: "gmail", kind: "google", owner: "alice", settings: { product: "gmail", clientFile: "app.json" } }];
+  writeFileSync(file, JSON.stringify(config));
+  await assert.rejects(startConfigured(file), /application_files_require_encrypted_store/);
 });

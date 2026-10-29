@@ -3,6 +3,7 @@ import type { LoadedConfig } from "./config.js";
 import type { Connector } from "./connector.js";
 import { Sealer, EnvelopeSealer, type ValueSealer } from "./sealer.js";
 import { GoogleKmsWrapper } from "./google-kms.js";
+import { CloudflareSecretsWrapper } from "./cloudflare-secrets.js";
 import { createHttpServer } from "./server.js";
 import { ConnectorService } from "./service.js";
 import { Store } from "./store.js";
@@ -18,10 +19,10 @@ export async function start(config: LoadedConfig, connectors: Connector[]): Prom
   if (config.encryption.provider === "development-file" && !["127.0.0.1", "::1"].includes(config.listen.host))
     throw new Error("development_encryption_requires_loopback");
   const sealer = createSealer(config);
-  // Verify IAM, key state, WIF and encryption before accepting requests.
-  if (config.encryption.provider === "google-cloud-kms") {
+  // Verify the configured remote wrapping service before accepting requests.
+  if (config.encryption.provider !== "development-file") {
     const probe = await sealer.seal("startup-check", "ready");
-    if (await sealer.open("startup-check", probe) !== "ready") throw new Error("kms_startup_check_failed");
+    if (await sealer.open("startup-check", probe) !== "ready") throw new Error("encryption_startup_check_failed");
   }
   const store = new Store(config.stateDirectory);
   const service = new ConnectorService({
@@ -49,5 +50,5 @@ export async function start(config: LoadedConfig, connectors: Connector[]): Prom
 
 export function createSealer(config: LoadedConfig): ValueSealer {
   return config.encryption.provider === "development-file" ? new Sealer(config.encryption.key) :
-    new EnvelopeSealer(new GoogleKmsWrapper(config.encryption));
+    new EnvelopeSealer(config.encryption.provider === "cloudflare-worker-secrets" ? new CloudflareSecretsWrapper(config.encryption) : new GoogleKmsWrapper(config.encryption));
 }

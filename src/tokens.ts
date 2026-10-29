@@ -24,6 +24,7 @@ export interface Caller {
   owner: string;
   connections: string[];
   tokenId: string;
+  readOnly?: boolean;
 }
 
 export interface Grant {
@@ -42,7 +43,7 @@ export class TokenError extends Error {
 }
 
 const id = z.string().min(1).max(256);
-const callerClaims = z.object({ sub: id, owner: id, connections: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)).max(64), jti: id });
+const callerClaims = z.object({ sub: id, owner: id, connections: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{0,31}$/)).max(64), jti: id, readOnly: z.boolean().optional() });
 const serviceClaims = z.object({ sub: id, jti: id });
 const grantClaims = z.object({ sub: id, op: id, dig: z.string().regex(/^[0-9a-f]{64}$/), apv: id.optional(), jti: id });
 
@@ -62,7 +63,7 @@ export class TokenVerifier {
   async caller(token: string, now = new Date()): Promise<Caller> {
     const payload = await this.#verify(token, "caller", now);
     const claims = parse(callerClaims, payload);
-    return { agentId: claims.sub, owner: claims.owner, connections: claims.connections, tokenId: claims.jti };
+    return { agentId: claims.sub, owner: claims.owner, connections: claims.connections, tokenId: claims.jti, ...(claims.readOnly !== undefined ? { readOnly: claims.readOnly } : {}) };
   }
   async service(token: string, now = new Date()): Promise<{ service: string }> {
     return { service: parse(serviceClaims, await this.#verify(token, "service", now)).sub };

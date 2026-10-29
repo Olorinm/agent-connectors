@@ -3,11 +3,11 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
-import { builtinConnectors } from "./connectors/index.js";
 import { generateSigningKey, signServiceToken } from "./issuer.js";
-import { createSealer, start } from "./start.js";
+import { createSealer } from "./start.js";
 import { Store } from "./store.js";
-import { SecretFiles, secretPath } from "./secret-files.js";
+import { SecretFiles } from "./secret-files.js";
+import { startConfigured } from "./start-configured.js";
 
 const usage = `agent-connectors serve --config <file>
 agent-connectors init --out <new-directory> --owner <owner-id> [--redirect-url <url>]
@@ -27,25 +27,9 @@ function option(args: string[], name: string) {
 const [command, ...args] = process.argv.slice(2);
 switch (command) {
   case "serve": {
-    const file = option(args, "--config"), config = loadConfig(file);
-    for (const connection of config.connections) {
-      const path = connection.settings?.[connection.kind === "feishu" ? "directory" : "clientFile"];
-      if (typeof path !== "string") continue;
-      if (config.encryption.provider === "google-cloud-kms" && !config.secretFiles)
-        throw new Error("kms_application_files_require_encrypted_store");
-      if (config.secretFiles) secretPath(path);
-    }
-    const files = config.secretFiles ? await SecretFiles.open(config.secretFiles.file, config.secretFiles.runtimeDirectory,
-      createSealer(config), config.encryption.provider === "google-cloud-kms") : undefined;
-    let started;
-    try {
-      started = await start(config, builtinConnectors({ baseDirectory: files?.directory ?? dirname(resolve(file)),
-        stateDirectory: config.stateDirectory, redirectUrl: config.oauthRedirectUrl,
-        ...(files ? { withSecretFiles: <T>(operation: () => Promise<T>) => files.run(operation) } : {}),
-      }));
-    } catch (error) { await files?.close(); throw error; }
+    const started = await startConfigured(option(args, "--config"));
     console.log(JSON.stringify({ event: "listening", url: started.url }));
-    const stop = () => void started.close().then(async () => { await files?.close(); process.exit(0); });
+    const stop = () => void started.close().then(() => process.exit(0));
     process.once("SIGTERM", stop);
     process.once("SIGINT", stop);
     break;

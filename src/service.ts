@@ -173,7 +173,7 @@ export class ConnectorService {
   tools(caller: Caller): ExposedTool[] {
     const visible: ExposedTool[] = [];
     for (const [name, { connection, tool, schema }] of this.#tools) {
-      if (!this.#allowed(caller, connection)) continue;
+      if (!this.#allowed(caller, connection) || (caller.readOnly && tool.risk !== "read")) continue;
       visible.push({
         name, risk: tool.risk, inputSchema: schema,
         description: `${connection.label ?? connection.id}: ${tool.description}${tool.risk === "write" ? " Requires the owner's approval on a trusted device unless pre-approved; returns approval_required with an operationId. Never ask the owner to paste approvals into chat." : ""}`,
@@ -200,7 +200,7 @@ export class ConnectorService {
       catch (error) { return { status: "failed", error: error instanceof ConnectorError ? error.code : "connection_check_failed" }; }
     }
     const entry = this.#tools.get(name);
-    if (!entry || !this.#allowed(caller, entry.connection)) return { status: "failed", error: "tool_not_available" };
+    if (!entry || !this.#allowed(caller, entry.connection) || (caller.readOnly && entry.tool.risk !== "read")) return { status: "failed", error: "tool_not_available" };
     const parsed = entry.tool.input.safeParse(args ?? {});
     if (!parsed.success) return { status: "failed", error: "invalid_arguments", detail: JSON.parse(JSON.stringify(z.treeifyError(parsed.error))) };
     let input: Json;
