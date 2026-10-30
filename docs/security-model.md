@@ -13,6 +13,8 @@ Only the MCP URL and a caller token: EdDSA JWT, `typ: agent-connectors.caller+jw
 claims `sub` (Agent ID), `owner`, `connections`. A stolen token allows, until expiry, what the Agent itself
 can do: read through the listed connections of that owner and *request* writes. It cannot approve anything.
 
+The optional signed `readOnly: true` claim restricts both discovery and execution to reads, including refusal of pre-approved writes. `ConnectorReadClient` keeps these short-lived tokens in the trusted product server and returns tool results to the Agent instead. The product remains responsible for owner/Agent assignment and conversation admission.
+
 ## Keys
 
 | Key | Signs | Holder |
@@ -138,6 +140,14 @@ API cannot enforce storage choices inside caller-supplied custom connectors.
 This implementation covers connector OAuth state, operation payloads, application files and Feishu
 CLI files when configured as above. It does not encrypt Mau/Router's own state. Deployment and real KMS
 authorization tests are required separately from the repository's local tests.
+
+## Cloudflare remote key wrapping
+
+`encryption.provider: "cloudflare-worker-secrets"` uses the separate `cloudflare/src/key-vault.mjs` Worker to wrap 32-byte data keys. Configure a fixed HTTPS root `url`, a `keyId`, and a private `tokenFile` containing the caller token. The Worker requires matching `KEY_ID`, `WRAPPING_KEY` (32 random bytes in base64url), and `CALLER_TOKEN` secrets. Optional `LIMITER` uses the Workers rate-limit binding; it is not a global billing cap.
+
+The master wrapping key resides in Worker Secrets. The connector sends only random data keys and their authenticated context, never OAuth tokens or mail. AES-256-GCM envelopes and the encrypted `secretFiles` bundle use the same bound envelope format as the KMS option, but this is **not non-exportable KMS**: a Cloudflare administrator or arbitrary Worker deployment can use/expose the key. An authorized connector process can unwrap data keys. Keep the Worker separate from the existing business read broker; never replace that broker with this entrypoint.
+
+Requests require the private caller token, reject browser Origins, enforce exact key/context and bounded bodies, and do not follow redirects or automatically retry. Startup verifies wrapping and unwrapping. Production application files still require a private Linux tmpfs runtime directory. Keep the master key in independent recovery storage: replacing it without rewrapping existing data makes that data unreadable. Rotate the caller token separately. This option does not provision a Worker or Google application automatically.
 
 ## Remote MCP tools
 

@@ -184,3 +184,16 @@ test("a pending write cannot run after its connection moved to another owner", a
   await assert.rejects(service.approve(await s.verifier.grant(await s.grant(view)), signal()), { message: "connection_unavailable" });
   assert.equal(s.effects.length, 0);
 });
+
+test('signed read-only callers can read but cannot request or pre-approve writes', async t => {
+  const s = await setup(); t.after(s.cleanup);
+  const caller = await s.verifier.caller(await s.callerToken({ readOnly: true }));
+  assert.equal(caller.readOnly, true);
+  assert.ok(s.service.tools(caller).every(tool => tool.risk === 'read'));
+  assert.equal((await s.service.call(caller, 'alice_notes__list', {}, signal())).status, 'completed');
+  for (const to of ['someone', 'invoice-table']) {
+    assert.deepEqual(await s.service.call(caller, 'alice_notes__send', { to, text: 'blocked' }, signal()), { status: 'failed', error: 'tool_not_available' });
+  }
+  assert.equal(s.effects.length, 0);
+  assert.equal((await s.service.pending()).length, 0);
+});

@@ -39,8 +39,8 @@ async function sign(kind: keyof typeof TOKEN_TYPES, claims: Record<string, unkno
 }
 
 /** Short-lived identity for one Agent, limited to the listed connections. */
-export function signCallerToken(options: Common & { agentId: string; owner: string; connections: string[] }) {
-  return sign("caller", { owner: options.owner, connections: options.connections }, options.agentId, options, LIMITS.callerSeconds);
+export function signCallerToken(options: Common & { agentId: string; owner: string; connections: string[]; readOnly?: boolean }) {
+  return sign("caller", { owner: options.owner, connections: options.connections, ...(options.readOnly !== undefined ? { readOnly: options.readOnly } : {}) }, options.agentId, options, LIMITS.callerSeconds);
 }
 
 export function signServiceToken(options: Common & { service: string }) {
