@@ -86,8 +86,20 @@ export class CloudflareBrowserRun implements BrowserRuntime {
 class RemoteSession implements BrowserSession {
   private cdp?: CDPSession;
   constructor(readonly id: string, private readonly browser: Browser, private readonly context: BrowserContext, private page: Page) {}
-  private state = async (): Promise<PageState> => ({ url: this.page.url(), title: (await this.page.title()).slice(0, 300) });
-  private settle = async () => { await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {}); await this.page.waitForTimeout(800); };
+  /** A click may start a navigation; reading the title mid-navigation throws, so wait for the new document and retry. */
+  private state = async (): Promise<PageState> => {
+    for (let attempt = 0; ; attempt++) {
+      try { return { url: this.page.url(), title: (await this.page.title()).slice(0, 300) }; }
+      catch (error) {
+        if (attempt >= 3 || !(error instanceof Error) || !/context was destroyed|navigat/i.test(error.message)) throw error;
+        await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+      }
+    }
+  };
+  private settle = async () => {
+    await this.page.waitForTimeout(800);
+    await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+  };
   private element(ref: string) {
     if (!/^(?:f\d{1,4})?e\d{1,6}$/.test(ref)) throw new ConnectorError("browser_ref_invalid");
     return this.page.locator(`aria-ref=${ref}`);

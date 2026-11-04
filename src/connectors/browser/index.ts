@@ -74,7 +74,12 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
         return result;
       } catch (error) {
         // A broken connection is reattached on the next call; known page errors keep the session.
-        if (!(error instanceof ConnectorError)) { live.delete(id); await session.close().catch(() => {}); }
+        if (!(error instanceof ConnectorError)) {
+          // Operators need a cause; log only the error class and first line, never page content or credentials.
+          console.error(JSON.stringify({ event: "browser_unexpected_error", connection: id, name: error instanceof Error ? error.name : typeof error,
+            message: error instanceof Error ? error.message.split("\n")[0]!.slice(0, 200) : "" }));
+          live.delete(id); await session.close().catch(() => {});
+        }
         throw error;
       }
     });
