@@ -109,6 +109,11 @@ test("upload refuses a site that is not the current page and rejects non-origin 
   assert.equal(tool.input.safeParse({ site: "https://upload.example.com/path", ref: "e1", file: { name: "a", mediaType: "text/plain", contentBase64: "YQ==" } }).success, false);
   assert.equal(tool.input.safeParse({ site: "http://upload.example.com", ref: "e1", file: { name: "a", mediaType: "text/plain", contentBase64: "YQ==" } }).success, false);
   assert.equal(tool.input.safeParse({ site: "https://upload.example.com", ref: "e1", file: { name: "../a", mediaType: "text/plain", contentBase64: "YQ==" } }).success, false);
+  // Content types with parameters are accepted and reduced to the bare type the browser expects.
+  const withCharset = tool.input.safeParse({ site: "https://upload.example.com", ref: "e1", file: { name: "a.txt", mediaType: "text/plain; charset=utf-8", contentBase64: "YQ==" } });
+  assert.equal(withCharset.success, true);
+  assert.equal(withCharset.data.file.mediaType, "text/plain");
+  assert.equal(tool.input.safeParse({ site: "https://upload.example.com", ref: "e1", file: { name: "a", mediaType: "not a type", contentBase64: "YQ==" } }).success, false);
   // Executing directly (as the service does after approval) refuses a mismatched page.
   const context = { connection: { id: "web", kind: "browser", owner: "@alice", settings: { accountId: ACCOUNT, tokenFile: "x" } },
     credentials: { get: () => ({ version: 1, cookies: [], sessionId: "s1" }), put: () => {} }, signal: new AbortController().signal };
