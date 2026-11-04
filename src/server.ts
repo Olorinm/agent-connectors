@@ -15,6 +15,8 @@ export interface HttpOptions {
 }
 
 const MAX_BODY = 1_000_000;
+/** Authenticated MCP calls may carry a browser upload (10 MB file as base64 plus JSON). */
+const MAX_MCP_BODY = 15_000_000;
 
 /**
  * Routes:
@@ -63,7 +65,7 @@ async function handle(options: HttpOptions, request: IncomingMessage, response: 
   if (url.pathname === "/mcp") {
     if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");
     const caller = await options.tokens.caller(bearer(request));
-    return mcp(options, caller, request, response, await body(request));
+    return mcp(options, caller, request, response, await body(request, MAX_MCP_BODY));
   }
   if (path[0] === "v1" && path[1] === "operations") {
     const id = path[2];
@@ -130,12 +132,12 @@ function bearer(request: IncomingMessage) {
   return match[1]!;
 }
 
-async function body(request: IncomingMessage): Promise<unknown> {
+async function body(request: IncomingMessage, limit = MAX_BODY): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     size += (chunk as Buffer).length;
-    if (size > MAX_BODY) throw new HttpError(413, "body_too_large");
+    if (size > limit) throw new HttpError(413, "body_too_large");
     chunks.push(chunk as Buffer);
   }
   try {

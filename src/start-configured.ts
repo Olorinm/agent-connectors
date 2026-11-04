@@ -8,7 +8,7 @@ import { createSealer, start, type Started } from "./start.js";
 export async function startConfigured(file: string): Promise<Started> {
   const config = loadConfig(file);
   for (const connection of config.connections) {
-    const path = connection.settings?.[connection.kind === "feishu" ? "directory" : "clientFile"];
+    const path = connection.settings?.[connection.kind === "feishu" ? "directory" : connection.kind === "browser" ? "tokenFile" : "clientFile"];
     if (typeof path !== "string") continue;
     if (config.encryption.provider !== "development-file" && !config.secretFiles) throw new Error("application_files_require_encrypted_store");
     if (config.secretFiles) secretPath(path);

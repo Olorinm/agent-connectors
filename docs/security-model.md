@@ -176,6 +176,27 @@ auth-failure replay are disabled. The SDK transport retains multipart, proxy and
 request interceptor that restricts HTTPS origins and refuses redirects. Any failure after a write dispatch remains
 uncertain. Google tool definitions and account generations are included in the approval fingerprint.
 
+## Browser (Cloudflare Browser Run)
+
+The `browser` connector drives a remote Chromium on Cloudflare Browser Run through the official Playwright CDP
+client. The browser runs outside the Agent environment and outside this service; the Cloudflare API token
+(Browser Rendering - Edit only) is read from a private file and never returned. Site cookies are the connection's
+credential: they are sealed like other credentials, restored into a new remote browser, and never returned to callers.
+
+**Deliberate exception to "anything with an external effect is a write".** By product decision, matching how
+comparable assistants behave, `open`, `snapshot`, `click`, `type`, `press`, `screenshot` and `download` run without
+approval, so a click can submit a form or place an order on a site the owner is signed in to. Only `upload` (sending
+a file to a site) is a write: the owner approves the exact file and origin, and execution refuses a page whose origin
+differs from the approved `site`. Treat a browser connection as trusted with everything its stored sign-ins allow; do
+not store sign-ins for banking, payment or accounts where an unattended click is unacceptable.
+
+Navigation and downloads refuse non-http(s) URLs, embedded credentials, and loopback, private, link-local and
+`.internal` hosts before a browser is attached; each download redirect is checked again. Downloads are captured in
+the remote browser with the CDP Fetch domain (same cookies and egress as browsing, at most 10 MB) and returned as
+base64 for the composing product to store; nothing is written to this host. `handoff_start` returns a Live View URL
+that grants control of the browser until it expires. It is meant for the owner only, so a composer must deliver it to
+the owner directly, not to the model.
+
 ## HTTP
 
 Requests carrying an `Origin` header are refused, as is an unexpected `Host` when `allowedHosts` is set.

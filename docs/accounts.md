@@ -9,6 +9,7 @@ connector host. The Agent receives only a short-lived caller token, never a prov
 | `google` | [Official Google APIs and Node SDKs](https://github.com/googleapis/google-api-nodejs-client) | Google Cloud OAuth web client and enabled product APIs; works with personal Google accounts |
 | `feishu` | Official `@larksuite/cli`, pinned version | Feishu app, app secret, permitted scopes, expected owner's `open_id` |
 | `notion` | [Official remote MCP](https://developers.notion.com/guides/mcp/build-mcp-client), `https://mcp.notion.com/mcp` | No manually registered app needed for the default dynamic registration flow |
+| `browser` | [Cloudflare Browser Run](https://developers.cloudflare.com/browser-run/) through the official Playwright CDP client | Cloudflare account ID and an API token limited to Browser Rendering - Edit, in a mode-0600 `tokenFile` |
 
 End users follow a consent link after this operator setup. They do not create OAuth applications themselves.
 Notion uses OAuth dynamic client registration. GitHub and Google use the application's registered client ID
@@ -157,6 +158,11 @@ GitHub and Notion tools use upstream-discovered schemas. Google tools use local 
 
 There is no raw URL/API passthrough or cross-user Gmail ID parameter. Gmail creates drafts; sending mail is not
 exposed by this adapter. Feishu retains `cli_read` and `cli_write`.
+
+The `browser` connection (settings `{ "accountId": "<32 hex>", "tokenFile": "browser-token" }`) exposes `open`,
+`snapshot` (accessibility tree with refs), `click`, `type`, `press`, `screenshot`, `download`, `handoff_start`,
+`handoff_status` and `close` without approval, and `upload` as a write approved per file and site. See
+[browser security](security-model.md#browser-cloudflare-browser-run) for why clicks are not writes here.
 
 Only exact names in the code-reviewed catalog are exposed. New upstream tools remain unavailable until reviewed.
 Upstream schemas validate input without transforming it. Google schemas apply documented defaults before the exact
