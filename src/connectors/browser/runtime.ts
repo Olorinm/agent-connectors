@@ -27,6 +27,8 @@ export interface BrowserSession {
   upload(ref: string, file: { name: string; mediaType: string; contentBase64: string }): Promise<PageState>;
   handoffStart(instructions: string, timeoutMs: number): Promise<Handoff>;
   handoffState(): Promise<HandoffState>;
+  /** Revokes the owner's live view by replacing the tab it is bound to. */
+  handoffCancel(): Promise<PageState>;
   cookies(): Promise<Cookie[]>;
   close(): Promise<void>;
 }
@@ -212,6 +214,13 @@ class RemoteSession implements BrowserSession {
     const cdp = await this.session() as CDPSession & { send(method: string, params?: object): Promise<any> };
     const state = await cdp.send("Cloudflare.getHandoffState", {});
     return { active: Boolean(state?.active), ...(typeof state?.handoffId === "string" ? { handoffId: state.handoffId } : {}) };
+  }
+  async handoffCancel() {
+    // Browser Run documents no revoke command; a Live View is bound to its tab, so close that tab.
+    await this.cdp?.detach().catch(() => {}); this.cdp = undefined;
+    const old = this.page; this.page = await this.context.newPage();
+    await old.close().catch(() => {});
+    return this.state();
   }
   async cookies() { return (await this.context.cookies()) as Cookie[]; }
   /** Disconnects this client; the remote browser keeps running until its keep-alive ends. */

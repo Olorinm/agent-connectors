@@ -24,6 +24,7 @@ function fakeRuntime() {
     upload: async (ref, file) => { log.push(["upload", ref, file.name]); return { url, title: "Uploaded" }; },
     handoffStart: async (instructions, ms) => { log.push(["handoff", instructions, ms]); return { handoffId: "h1", liveViewUrl: "https://live.browser.run/ui/view?jwt=secret", expiresAt: new Date(Date.now() + ms).toISOString() }; },
     handoffState: async () => ({ active: false }),
+    handoffCancel: async () => { log.push(["handoff_cancel"]); return { url: "about:blank", title: "" }; },
     cookies: async () => cookies,
     close: async () => { log.push(["close"]); },
   });
@@ -126,6 +127,10 @@ test("handoff returns the live view URL and tracks completion by id", async (t) 
   const done = await call(s.service, "handoff_status", { handoffId: "h1" });
   assert.equal(done.result.done, true);
   assert.equal((await call(s.service, "handoff_status", { handoffId: "other" })).error, "browser_handoff_not_found");
+  assert.equal((await call(s.service, "handoff_cancel", { handoffId: "other" })).error, "browser_handoff_not_found");
+  assert.ok(!s.log.some((e) => e[0] === "handoff_cancel"), "an unknown handoff id cancels nothing");
+  assert.equal((await call(s.service, "handoff_cancel", { handoffId: "h1" })).result.cancelled, true);
+  assert.equal((await call(s.service, "handoff_status", { handoffId: "h1" })).error, "browser_handoff_not_found", "a cancelled handoff is forgotten");
 });
 
 test("token file must be private and well formed", async (t) => {

@@ -139,6 +139,14 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
         const current = await session.snapshot(0);
         return { handoffId: value.handoffId, active, done: !active, ...(expired ? { reason: "expired" } : {}), ...page(current) };
       }),
+    read("handoff_cancel", "End the current handoff: the owner's live view stops controlling the browser (its tab is replaced by a blank one).",
+      z.object({ handoffId: z.string().max(100) }).strict(), async (session, value, saved, context) => {
+        if (saved.handoff?.handoffId !== value.handoffId) throw new ConnectorError("browser_handoff_not_found");
+        const current = await session.handoffCancel();
+        const { handoff: _handoff, ...rest } = await load(context);
+        await save(context, rest);
+        return { handoffId: value.handoffId, cancelled: true, ...page(current) };
+      }),
     read("close", "Disconnect from the browser and save cookies. The next call reconnects or starts a new browser with the saved cookies.",
       z.object({}).strict(), async (session, _value, _saved, context) => {
         await save(context, { ...(await load(context)), sessionId: session.id, cookies: await session.cookies() as Cookie[] });
