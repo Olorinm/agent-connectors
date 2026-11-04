@@ -96,7 +96,8 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
     description: "Attach a file to a file input on the current page. The owner approves the exact file and site first. " +
       "site must equal the current page's origin; ref comes from the latest snapshot.",
     input: z.object({ site, ref, file: z.object({ name: z.string().min(1).max(120).regex(/^[^/\\\u0000-\u001f]+$/),
-      mediaType: z.string().regex(/^[a-z]+\/[a-zA-Z0-9.+-]+$/), contentBase64: z.string().min(1).max(MAX_UPLOAD_BASE64).regex(/^[A-Za-z0-9+/]+={0,2}$/) }).strict() }).strict(),
+      // Accept parameters such as "; charset=utf-8" but hand the browser only the bare type.
+      mediaType: z.string().max(200).regex(/^[a-zA-Z]+\/[a-zA-Z0-9.+-]+(?:\s*;.*)?$/).transform((v) => v.split(";")[0]!.trim().toLowerCase()), contentBase64: z.string().min(1).max(MAX_UPLOAD_BASE64).regex(/^[A-Za-z0-9+/]+={0,2}$/) }).strict() }).strict(),
     summarize: (value) => `上传 ${value.file.name}（${Math.ceil(value.file.contentBase64.length * 0.75 / 1024)} KB）到 ${new URL(value.site).host}`,
     execute: (context, value) => locked(context, async (session) => {
       const current = new URL((await session.snapshot(0)).url);
