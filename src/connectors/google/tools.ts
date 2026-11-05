@@ -9,6 +9,7 @@ import { Readable } from "node:stream";
 import { z } from "zod";
 import type { Risk } from "../../connector.js";
 import type { GoogleProduct } from "./account.js";
+import { gmailTools } from "./gmail.js";
 
 function clients(auth: OAuth2Client) {
   return { gmail: gmail({ version: "v1", auth }), drive: drive({ version: "v3", auth }),
@@ -31,11 +32,9 @@ function tool<Input>(name: string, description: string, risk: Risk, input: z.Zod
 }
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,256}$/);
 const page = { pageToken: z.string().max(4096).optional(), maxResults: z.number().int().min(1).max(100).default(25) };
-const message = z.object({ messageId: id }).strict();
 const file = z.object({ fileId: id }).strict();
 const text = z.string().max(200_000);
 const address = z.email().max(254);
-const empty = z.object({}).strict();
 const cells = z.array(z.array(z.union([z.string().max(50_000), z.number(), z.boolean(), z.null()])).max(1000)).max(1000);
 const range = z.string().min(1).max(1000);
 const calendarId = z.string().regex(/^[A-Za-z0-9_.@#-]{1,512}$/).default("primary");
@@ -49,48 +48,10 @@ const eventFields = {
   attendees: z.array(z.object({ email: address }).strict()).max(100).optional(),
 };
 
-function subjectHeader(subject: string) {
-  const words: string[] = [];
-  let part = "";
-  for (const character of subject) {
-    if (Buffer.byteLength(part + character) > 42) { words.push(part); part = ""; }
-    part += character;
-  }
-  words.push(part);
-  return words.map((word) => `=?UTF-8?B?${Buffer.from(word).toString("base64")}?=`).join("\r\n ");
-}
-
 /** All request methods and endpoint families are fixed here; no raw API passthrough. */
 export function googleTools(product: GoogleProduct): GoogleTool[] {
   switch (product) {
-    case "gmail": return [
-      tool("search_threads", "Search the owner's Gmail threads; q uses Gmail search syntax.", "read",
-        z.object({ q: z.string().max(4000).optional(), ...page }).strict(),
-        (a, p, o) => a.gmail.users.threads.list({ userId: "me", ...p }, o)),
-      tool("get_thread", "Read a Gmail thread and its messages.", "read", z.object({ threadId: id }).strict(),
-        (a, p, o) => a.gmail.users.threads.get({ userId: "me", id: p.threadId, format: "full" }, o)),
-      tool("get_message", "Read a Gmail message.", "read", message,
-        (a, p, o) => a.gmail.users.messages.get({ userId: "me", id: p.messageId, format: "full" }, o)),
-      tool("list_drafts", "List Gmail drafts.", "read", z.object(page).strict(),
-        (a, p, o) => a.gmail.users.drafts.list({ userId: "me", ...p }, o)),
-      tool("list_labels", "List Gmail labels.", "read", empty, (a, _p, o) => a.gmail.users.labels.list({ userId: "me" }, o)),
-      tool("create_draft", "Create a plain-text Gmail draft. This does not send mail.", "write",
-        z.object({ to: z.array(address).min(1).max(100), cc: z.array(address).max(100).optional(),
-          subject: z.string().max(1000).regex(/^[^\r\n]*$/), body: text }).strict(),
-        (a, p, o) => {
-          const mime = [
-            `To: ${p.to.join(", ")}`, ...(p.cc?.length ? [`Cc: ${p.cc.join(", ")}`] : []),
-            `Subject: ${subjectHeader(p.subject)}`,
-            "MIME-Version: 1.0", 'Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: base64", "",
-            Buffer.from(p.body).toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "",
-          ].join("\r\n");
-          return a.gmail.users.drafts.create({ userId: "me", requestBody: { message: { raw: Buffer.from(mime).toString("base64url") } } }, o);
-        }),
-      tool("modify_message_labels", "Add or remove labels on one message.", "write",
-        z.object({ messageId: id, addLabelIds: z.array(id).max(100).default([]), removeLabelIds: z.array(id).max(100).default([]) }).strict(),
-        (a, p, o) => a.gmail.users.messages.modify({ userId: "me", id: p.messageId,
-          requestBody: { addLabelIds: p.addLabelIds, removeLabelIds: p.removeLabelIds } }, o)),
-    ];
+    case "gmail": return gmailTools();
     case "drive": return [
       tool("search_files", "List or search Drive files. q uses Drive query syntax.", "read",
         z.object({ q: z.string().max(4000).optional(), ...page }).strict(),

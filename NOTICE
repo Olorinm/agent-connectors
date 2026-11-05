@@ -5,3 +5,9 @@ src/connectors/feishu/account.ts is adapted from Agent Router
 (https://github.com/Olorinm/agent-router), MIT License, Copyright (c) 2026 Agent Router contributors.
 
 The Feishu connector runs the official @larksuite/cli binary (MIT License, Lark Technologies).
+
+src/connectors/google/gmail-spec.ts contains tool and field descriptions copied from Google's Gmail MCP reference
+(https://developers.google.com/workspace/gmail/api/reference/mcp), Google Developers documentation licensed under
+the Creative Commons Attribution 4.0 License (https://creativecommons.org/licenses/by/4.0/).
+
+Gmail bodies are converted with html-to-text (MIT License) and drafts are composed with nodemailer (MIT-0 License).

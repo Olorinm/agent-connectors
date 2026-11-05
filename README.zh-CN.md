@@ -23,7 +23,7 @@ node dist/cli.js serve --config .local-four-services/connectors.json
 
 `init` 生成本地开发密钥和账号配置，不会自动授权，只能监听本机回环地址。生产环境配置 Google Cloud KMS 和集群短期身份，见[加密配置](docs/security-model.md#production-encryption)。GitHub、Google 的 OAuth 应用由产品方配置一次；用户随后打开授权链接。**Google 不需要填写 MCP 预览申请表**：启用所需正式 API，配置 OAuth Web 应用即可。普通 Gmail 账号用 External 受众，开发阶段添加为测试用户；公众上线按申请的权限处理 OAuth 审核。Notion 默认使用动态客户端注册。
 
-Google 已提供 Gmail、Drive、Docs、Sheets、Slides 和 Calendar 的具体读写工具。原有 `kind: "google"` 配置可以继续用；旧预览 MCP 授权需重新连接，Agent 需刷新工具列表。
+Google 已提供 Gmail、Drive、Docs、Sheets、Slides 和 Calendar 的具体读写工具。Gmail 的工具名、参数和返回字段与 Google 官方 Gmail MCP 一致，返回整理后的邮件内容，不返回原始 API 数据（见 [accounts](docs/accounts.md)）。原有 `kind: "google"` 配置可以继续用；旧预览 MCP 授权需重新连接，Agent 需刷新工具列表。
 
 统一入口是 `connection status`、`connection connect <id>`、`connection disconnect <id>`，使用可信端的 authority key。详见[四个服务的配置、授权和凭证说明](docs/accounts.md)。
 

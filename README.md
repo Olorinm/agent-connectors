@@ -76,7 +76,7 @@ An explicit `cloudflare-worker-secrets` encryption option is also available; see
 ## Connectors
 
 - [Feishu](docs/feishu.md): the official lark-cli as the owner; the CLI's own risk declaration decides read vs write.
-- [Google](docs/accounts.md): formal Google APIs through official Node SDKs, for personal and Workspace accounts.
+- [Google](docs/accounts.md): formal Google APIs through official Node SDKs, for personal and Workspace accounts. Gmail tools match the names, inputs and result fields of Google's Gmail MCP server and return shaped messages, not raw API payloads.
   No MCP preview eligibility is needed; the local Agent interface remains MCP.
 - [GitHub and Notion](docs/accounts.md): official remote MCP, operator-owned OAuth configuration or
   dynamic registration, typed tool discovery and locally reviewed read/write policy.

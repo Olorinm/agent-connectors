@@ -149,7 +149,7 @@ GitHub and Notion tools use upstream-discovered schemas. Google tools use local 
 
 | Product | Included tools |
 | --- | --- |
-| Gmail | Search/read threads and messages, list drafts/labels, create a plain-text draft, modify message labels |
+| Gmail | The ten tools of Google's Gmail MCP server, same names, inputs and output fields (see below) |
 | Drive | Search files, read metadata/content, create a text file, copy a file |
 | Docs | Read/create a document, append text |
 | Sheets | Read metadata/values, update or append values (RAW by default; USER_ENTERED is explicit) |
@@ -157,7 +157,24 @@ GitHub and Notion tools use upstream-discovered schemas. Google tools use local 
 | Calendar | List calendars/events, read/create/delete events; notification choice is part of approved arguments |
 
 There is no raw URL/API passthrough or cross-user Gmail ID parameter. Gmail creates drafts; sending mail is not
-exposed by this adapter. Feishu retains `cli_read` and `cli_write`.
+exposed by this adapter.
+
+Gmail follows the tool reference of Google's Gmail MCP server
+(<https://developers.google.com/workspace/gmail/api/reference/mcp>): `search_threads`, `get_thread`, `get_message`,
+`list_labels`, `list_drafts`, `create_draft`, `label_thread`, `unlabel_thread`, `label_message`, `unlabel_message`.
+Descriptions are copied verbatim (`src/connectors/google/gmail-spec.ts`) and results use the reference's fields
+(`sender`, `toRecipients`, `plaintextBody`, `attachments`, …) instead of raw Gmail API payloads. Where the reference is
+silent, this adapter decides and tells the model in the tool description:
+
+- `plaintextBody` is the text/plain part, or text converted from HTML (`html-to-text`) when there is no usable
+  plain text, such as a newsletter's "view in browser" stub.
+- `plaintextBody` and `htmlBody` are limited to 30,000 characters each; a thread keeps bodies for its newest messages
+  up to 120,000 characters and the rest show metadata and snippet (read them with `get_message`).
+- `date` is a full ISO 8601 timestamp; the reference documents a date only.
+- Adding `TRASH`/`SPAM` labels (the reference's separate sensitive tools) and draft attachments ("not supported yet"
+  in the reference) are refused. Label changes and drafts are writes and need approval.
+
+These choices have not been compared with the hosted server, which requires Developer Preview access. Feishu retains `cli_read` and `cli_write`.
 
 The `browser` connection (settings `{ "accountId": "<32 hex>", "tokenFile": "browser-token" }`) exposes `open`,
 `snapshot` (accessibility tree with refs), `click`, `type`, `press`, `screenshot`, `download`, `handoff_start`,

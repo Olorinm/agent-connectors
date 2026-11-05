@@ -44,6 +44,7 @@ function fakeGoogle() {
     if (remote.dropApi) throw new Error("connection lost with private-access in internal diagnostics");
     if (remote.failApi) return json({ error: { message: "private-access must not leak", code: remote.failApi } }, remote.failApi);
     if (url.searchParams.get("alt") === "media") return new Response("example content");
+    const routed = remote.route?.(url, request); if (routed !== undefined) return json(routed);
     return json({ id: "created-id", ok: true });
   };
   return remote;
@@ -83,7 +84,7 @@ async function fixture(t, product = "gmail") {
 }
 
 const products = {
-  gmail: { read: ["search_threads", { q: "in:inbox", maxResults: 10 }], write: ["create_draft", { to: ["reader@example.test"], subject: "主题", body: "正文" }],
+  gmail: { read: ["search_threads", { query: "in:inbox", pageSize: 10 }], write: ["create_draft", { to: ["reader@example.test"], subject: "主题", body: "正文" }],
     method: "POST", path: "/gmail/v1/users/me/drafts" },
   drive: { read: ["search_files", { q: "trashed = false" }], write: ["create_file", { name: "sample.txt", content: "hello" }],
     method: "POST", path: "/upload/drive/v3/files" },
@@ -225,4 +226,108 @@ test("Google credentials cannot be sent to an arbitrary host or a non-HTTPS endp
   for (const url of ["https://evil.test/", "http://gmail.googleapis.com/", "https://user:password@gmail.googleapis.com/"])
     await assert.rejects(() => client.request({ url }), /upstream_origin_not_allowed/);
   assert.equal(s.remote.requests.length, before);
+});
+
+const b64 = (text) => Buffer.from(text).toString("base64url");
+const headers = (values) => Object.entries(values).map(([name, value]) => ({ name, value }));
+/** A newsletter: a placeholder text part, a large HTML part, a PDF attachment and Gmail's category labels. */
+function newsletter(id, html = "<style>.x{}</style><h1>November update</h1><p>26 new APIs and <a href=\"https://example.test/a\">SOC 2</a>.</p><img src=\"https://example.test/p.png\">") {
+  return { id, threadId: "thread-1", snippet: "26 new APIs", internalDate: "1762300800000", labelIds: ["UNREAD", "INBOX", "CATEGORY_UPDATES", "Label_7"],
+    payload: { mimeType: "multipart/mixed", headers: headers({ Subject: "November update", From: "\"Search, Team\" <news@example.test>",
+      To: "Owner <owner@example.test>, other@example.test", Cc: "", Date: "Wed, 05 Nov 2025 00:00:00 +0000", Received: "x".repeat(5000) }),
+    parts: [{ mimeType: "multipart/alternative", parts: [
+      { mimeType: "text/plain", body: { data: b64("View this email in your browser") } },
+      { mimeType: "text/html", body: { data: b64(html + "<p>" + "padding ".repeat(400) + "</p>") } }] },
+    { mimeType: "application/pdf", filename: "report.pdf", body: { attachmentId: "att-1", size: 1000 } }] } };
+}
+
+test("Gmail tools follow the official MCP shape: decoded bodies, HTML fallback, addresses, visible labels", async (t) => {
+  const s = await fixture(t); await s.authorize();
+  s.remote.route = (url) => {
+    if (url.pathname.endsWith("/threads/thread-1")) return { id: "thread-1", messages: [newsletter("m-1")] };
+    if (url.pathname.endsWith("/messages/m-1")) return newsletter("m-1");
+  };
+  const tools = (await s.connector.discover({ connection: s.connection, credentials: s.credentials, signal: signal() })).map((tool) => tool.name);
+  assert.deepEqual(tools.sort(), ["create_draft", "get_message", "get_thread", "label_message", "label_thread", "list_drafts", "list_labels", "search_threads", "unlabel_message", "unlabel_thread"]);
+  const thread = (await s.call("get_thread", { threadId: "thread-1" })).result;
+  const [message] = thread.messages;
+  assert.equal(message.sender, "news@example.test");
+  assert.deepEqual(message.toRecipients, ["owner@example.test", "other@example.test"]);
+  assert.deepEqual(message.labelIds, ["UNREAD", "INBOX", "Label_7"]);
+  assert.equal(message.subject, "November update");
+  assert.equal(message.date, "2025-11-05T00:00:00.000Z");
+  // The placeholder text part is replaced by text converted from the HTML part.
+  assert.match(message.plaintextBody, /NOVEMBER UPDATE|November update/);
+  assert.match(message.plaintextBody, /26 new APIs/);
+  assert.doesNotMatch(message.plaintextBody, /View this email|p\.png|<style/);
+  assert.match(message.htmlBody, /<h1>November update<\/h1>/);
+  assert.deepEqual(message.attachments, [{ id: "att-1", mimeType: "application/pdf", filename: "report.pdf" }]);
+  assert.deepEqual(message.attachmentIds, ["att-1"]);
+  assert.equal(JSON.stringify(thread).includes("Received"), false);
+  const request = s.remote.apiCalls.find((call) => call.url.includes("/threads/thread-1"));
+  assert.equal(new URL(request.url).searchParams.get("format"), "full");
+  // MINIMAL and METADATA_ONLY use Gmail's metadata format and omit what the reference omits.
+  const minimal = (await s.call("get_message", { messageId: "m-1", messageFormat: "MINIMAL" })).result;
+  assert.deepEqual(Object.keys(minimal).sort(), ["ccRecipients", "date", "id", "labelIds", "sender", "snippet", "subject", "toRecipients"]);
+  const metadata = (await s.call("get_message", { messageId: "m-1", messageFormat: "METADATA_ONLY" })).result;
+  assert.deepEqual(Object.keys(metadata).sort(), ["ccRecipients", "date", "id", "labelIds", "sender", "toRecipients"]);
+  assert.equal(new URL(s.remote.apiCalls.at(-1).url).searchParams.get("format"), "metadata");
+});
+
+test("Gmail bodies are bounded per message and per thread; attachment-backed text parts are fetched", async (t) => {
+  const s = await fixture(t); await s.authorize();
+  const big = (id) => ({ ...newsletter(id), payload: { mimeType: "text/plain", headers: headers({ From: "a@example.test" }), body: { data: b64("y".repeat(50_000)) } } });
+  const stored = { ...newsletter("m-3"), payload: { mimeType: "text/plain", headers: headers({ From: "a@example.test" }), body: { attachmentId: "body-1", size: 90_000 } } };
+  s.remote.route = (url) => {
+    if (url.pathname.endsWith("/threads/long")) return { id: "long", messages: [big("old-1"), big("old-2"), big("old-3"), big("m-2"), stored] };
+    if (url.pathname.endsWith("/attachments/body-1")) return { data: b64("stored text body") };
+  };
+  const { messages } = (await s.call("get_thread", { threadId: "long" })).result;
+  assert.equal(messages[4].plaintextBody, "stored text body");
+  assert.ok(/^y{30000}…\[truncated: 20000 more characters\]$/.test(messages[3].plaintextBody));
+  assert.ok(/^y{30000}…/.test(messages[1].plaintextBody));
+  // Over the thread budget, the oldest message keeps metadata only and points to get_message.
+  assert.ok(messages[0].plaintextBody === "…[body omitted: thread too long; read it with get_message old-1]", messages[0].plaintextBody.slice(0, 80));
+  assert.equal(messages[0].sender, "a@example.test");
+});
+
+test("Gmail search composes the reference defaults and returns minimal messages only", async (t) => {
+  const s = await fixture(t); await s.authorize();
+  s.remote.route = (url) => {
+    if (url.pathname.endsWith("/users/me/threads")) return { threads: [{ id: "thread-1" }], nextPageToken: "next", resultSizeEstimate: 501 };
+    if (url.pathname.endsWith("/threads/thread-1")) return { id: "thread-1", messages: [newsletter("m-1")] };
+  };
+  const result = (await s.call("search_threads", { query: "is:unread", includeTrash: true })).result;
+  const list = new URL(s.remote.apiCalls.find((call) => new URL(call.url).pathname.endsWith("/users/me/threads")).url);
+  assert.equal(list.searchParams.get("q"), "is:unread -in:draft -in:spam");
+  assert.equal(list.searchParams.get("maxResults"), "20");
+  assert.equal(list.searchParams.get("includeSpamTrash"), "true");
+  assert.equal(result.nextPageToken, "next"); assert.equal(result.resultCountEstimate, "501");
+  assert.equal(result.threads[0].messages[0].plaintextBody, undefined);
+  assert.equal(result.threads[0].messages[0].subject, "November update");
+  assert.equal((await s.call("search_threads", { pageSize: 51 })).error, "invalid_arguments");
+});
+
+test("Gmail label and draft writes need approval; trash/spam labels and attachments are refused before any call", async (t) => {
+  const s = await fixture(t); await s.authorize();
+  s.remote.route = (url) => { if (url.pathname.endsWith("/messages/m-1")) return { ...newsletter("m-1"), payload: { ...newsletter("m-1").payload,
+    headers: headers({ From: "news@example.test", Subject: "Hi", Date: "Wed, 05 Nov 2025", "Message-ID": "<orig@example.test>", References: "<root@example.test>" }) } }; };
+  const before = s.remote.apiCalls.length;
+  for (const [name, args] of [["label_thread", { threadId: "t", labelIds: ["TRASH"] }], ["label_message", { messageId: "m", labelIds: ["SPAM"] }],
+    ["create_draft", { to: ["a@example.test"], attachments: [{ filename: "a.txt", content: "eA" }] }], ["create_draft", { to: ["Name a@example.test"] }]])
+    assert.equal((await s.call(name, args)).error, "invalid_arguments", name);
+  assert.equal(s.remote.apiCalls.length, before);
+  const removal = await s.call("unlabel_thread", { threadId: "t", labelIds: ["TRASH"] });
+  assert.equal(removal.status, "approval_required");
+  await s.approve(removal);
+  assert.deepEqual(JSON.parse(s.remote.apiCalls.at(-1).body), { removeLabelIds: ["TRASH"] });
+  const draft = await s.call("create_draft", { to: ["reader@example.test"], bcc: ["hidden@example.test"], subject: "Re: Hi", body: "Thanks", htmlBody: "<p>Thanks</p>", replyToMessageId: "m-1" });
+  assert.equal(draft.status, "approval_required");
+  assert.deepEqual((await s.approve(draft)).result, { id: "created-id" });
+  const sent = JSON.parse(s.remote.apiCalls.at(-1).body), mime = Buffer.from(sent.message.raw, "base64url").toString();
+  assert.equal(sent.message.threadId, "thread-1");
+  assert.match(mime, /In-Reply-To: <orig@example.test>/); assert.match(mime, /References: <root@example.test> <orig@example.test>/);
+  assert.match(mime, /Bcc: hidden@example.test/); assert.match(mime, /multipart\/alternative/);
+  const text = mime.split("Content-Type: text/plain")[1].split("\r\n\r\n")[1].split("\r\n--")[0].replace(/\r\n/g, "");
+  assert.match(Buffer.from(text, "base64").toString(), /^Thanks\n\nOn Wed, 05 Nov 2025, news@example.test wrote:\n> /);
 });
