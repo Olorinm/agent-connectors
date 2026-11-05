@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "guides",
     "LICENSE",
     "NOTICE",
     "README.md",
@@ -23,6 +24,10 @@
     "@larksuite/cli@1.0.97": true
   },
   "exports": {
+    "./guides": {
+      "types": "./dist/guides.d.ts",
+      "import": "./dist/guides.js"
+    },
     "./read-client": {
       "types": "./dist/read-client.d.ts",
       "import": "./dist/read-client.js"
