@@ -1,7 +1,7 @@
 # Cloudflare read broker
 
 This Worker authorizes one configured Agent and owner, then runs the reviewed
-business-data and Feishu bot readers in a trusted container. Agent guests do not
+Feishu bot reader in a trusted container. Agent guests do not
 receive upstream credentials. This deployment requires Workers Paid. It is separate
 from ConnectorService's OAuth store and approval-bound write workflow.
 

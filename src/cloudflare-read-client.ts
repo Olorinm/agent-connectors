@@ -20,6 +20,5 @@ export class CloudflareReadClient {
     const text=await response.text();if(text.length>1000000)throw Error('connector_result_too_large');
     return JSON.parse(text);
   }
-  call(tool:string,input:unknown){return this.request({kind:'business',tool,arguments:input});}
   read(args:string[]){return this.request({kind:'feishu',args});}
 }

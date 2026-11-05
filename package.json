@@ -35,10 +35,6 @@
       "types": "./dist/issuer.d.ts",
       "import": "./dist/issuer.js"
     },
-    "./business-data": {
-      "types": "./dist/business-data.d.ts",
-      "import": "./dist/business-data.js"
-    },
     "./feishu-bot-reader": {
       "types": "./dist/feishu-bot-reader.d.ts",
       "import": "./dist/feishu-bot-reader.js"

@@ -83,21 +83,17 @@ An explicit `cloudflare-worker-secrets` encryption option is also available; see
 
 ## Status
 
-Two public read adapters can also be composed into a trusted product server:
+A public read adapter can also be composed into a trusted product server:
 
-- `@olorinm/agent-connectors/business-data`: `BusinessDataClient` accepts a fixed MCP
-  endpoint and private `tokenFile`; it exposes only the reviewed business read
-  operations and validates their upstream input schemas. `call("tools", {})`
-  returns those schemas. Redirects and caller-selected endpoints are refused.
 - `@olorinm/agent-connectors/feishu-bot-reader`: `FeishuBotReader` runs the pinned
   official CLI using a fixed bot identity. Help, schemas and skills use an
   unconfigured CLI. Actual commands require both a read risk declaration and a
   read-only dry-run plan. Writes, identity changes and host file paths are refused.
 
-These adapters are not a deployment of ConnectorService: they reuse server-side
-credential files and do not provide KMS encryption, user OAuth, approval execution
+This adapter is not a deployment of ConnectorService: it reuses server-side
+credential files and does not provide KMS encryption, user OAuth, approval execution
 or caller-token verification. The composing server must authorize the Agent,
-owner and conversation before invoking them. Agent environments receive tool
+owner and conversation before invoking it. Agent environments receive tool
 results, never the credential files. Other credentials, including model access,
 are outside this guarantee.
 
@@ -108,5 +104,5 @@ operator setup and owner consent. Mau/Router's connection UI, token delivery and
 
 [The Cloudflare deployment](cloudflare/README.md) is a separate, narrow read broker.
 It uses Worker secrets for its fixed upstream credentials and does not need KMS.
-It supports the business-data and Feishu bot readers; it does not deploy the general
+It supports the Feishu bot reader; it does not deploy the general
 OAuth connection store or the approval-bound write service described above.

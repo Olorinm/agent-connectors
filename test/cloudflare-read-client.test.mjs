@@ -5,5 +5,5 @@ test('Cloudflare adapter fixes identity and destination, refuses insecure endpoi
  for(const endpoint of ['http://connector.fixture/','https://secret@connector.fixture/','https://connector.fixture/?key=1','https://connector.fixture/path'])assert.throws(()=>new CloudflareReadClient({...config,endpoint}));
  const old=globalThis.fetch;t.after(()=>globalThis.fetch=old);let status=200;
  globalThis.fetch=async(url,init)=>{assert.equal(url.href,'https://connector.fixture/v1/read');assert.equal(init.redirect,'error');const body=JSON.parse(init.body);assert.equal(body.agentId,config.agentId);assert.equal(body.owner,'alice');assert.equal(init.headers.authorization,'Bearer fixture-scoped-caller');return Response.json(status===200?{isError:false,content:[]}:{secret:'never return this diagnostic'},{status});};
- const client=new CloudflareReadClient(config);assert.equal((await client.call('catalog',{})).isError,false);status=401;await assert.rejects(()=>client.read(['--help']),/cloudflare_connector_unavailable/);
+ const client=new CloudflareReadClient(config);assert.equal((await client.read(['--help'])).isError,false);status=401;await assert.rejects(()=>client.read(['--help']),/cloudflare_connector_unavailable/);
 });

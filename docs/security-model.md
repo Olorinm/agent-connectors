@@ -218,8 +218,8 @@ service token; a caller token cannot connect or disconnect an account.
 
 `cloudflare/src/index.ts` is a separate, bounded read gateway. Mau authenticates with a
 random caller credential; the gateway binds it to one configured Agent and owner. It
-permits named business reads and the official Feishu CLI's locally classified read
-commands. Generic SQL, arbitrary upstream URLs and writes are refused. This deployment
+permits the official Feishu CLI's locally classified read commands. Arbitrary upstream
+URLs and writes are refused. This deployment
 does not expose the generic OAuth-management API or claim that new Google/Notion
 accounts have been authorized.
 
