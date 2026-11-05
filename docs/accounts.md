@@ -174,7 +174,25 @@ silent, this adapter decides and tells the model in the tool description:
 - Adding `TRASH`/`SPAM` labels (the reference's separate sensitive tools) and draft attachments ("not supported yet"
   in the reference) are refused. Label changes and drafts are writes and need approval.
 
-These choices have not been compared with the hosted server, which requires Developer Preview access. Feishu retains `cli_read` and `cli_write`.
+These choices have not been compared with the hosted server, which requires Developer Preview access.
+
+### Google Workspace CLI (`gws_read` / `gws_write`)
+
+When the official `gws` release binary is configured (`gwsBinary` option or `AGENT_CONNECTORS_GWS_BINARY`), a Google
+connection also offers `gws_read` and `gws_write`. They take the CLI's argument list for the connection's product
+(`gmail …`, `schema gmail.…`). Each command is first classified without credentials: a raw method by its Discovery
+`httpMethod` (GET reads), a helper (`+triage`, `+send`, …) by the method it calls, `--dry-run`, `--help` and `schema`
+as reads. A method none of whose Discovery scopes was granted is refused with `google_scope_not_granted` before any
+approval. Reads run immediately; `gws_read` refuses writes with `gws_command_requires_write_tool`, and `gws_write`
+waits for the owner, whose card shows the exact command. The access token reaches the process only as
+`GOOGLE_WORKSPACE_CLI_TOKEN`, with an empty configuration directory per call. Local files (`--upload`, `-a`, `-o`),
+`+watch` and `--sanitize` are refused; output is cut at 60,000 characters.
+
+### Agent guides
+
+`@olorinm/agent-connectors/guides` exports a guide per connector (`guides/*.md`): name, one-line description, the CLI
+command it exposes and the usage text. Products install the guides of an Agent's assigned connections, for example as
+skills next to a shell command that relays to `gws_*` or `cli_*` (see Agent Host's `agent-host-relay`). Feishu retains `cli_read` and `cli_write`.
 
 The `browser` connection (settings `{ "accountId": "<32 hex>", "tokenFile": "browser-token" }`) exposes `open`,
 `snapshot` (accessibility tree with refs), `click`, `type`, `press`, `screenshot`, `download`, `handoff_start`,

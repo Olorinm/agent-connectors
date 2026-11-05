@@ -11,3 +11,7 @@ src/connectors/google/gmail-spec.ts contains tool and field descriptions copied 
 the Creative Commons Attribution 4.0 License (https://creativecommons.org/licenses/by/4.0/).
 
 Gmail bodies are converted with html-to-text (MIT License) and drafts are composed with nodemailer (MIT-0 License).
+
+guides/google-gmail.md adapts the agent skills gws-shared, gws-gmail and gws-gmail-* of the Google Workspace CLI
+(https://github.com/googleworkspace/cli, v0.22.5, Apache License 2.0). The connector runs that CLI's official
+release binary when one is configured; the binary is not bundled in this package.

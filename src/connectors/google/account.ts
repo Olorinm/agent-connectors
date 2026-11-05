@@ -19,6 +19,10 @@ export interface GoogleOptions {
   redirectUrl?: string;
   /** Test injection, not a user/Agent-controlled endpoint setting. */
   fetch?: typeof fetch;
+  /** Path of the pinned official `gws` binary; defaults to AGENT_CONNECTORS_GWS_BINARY. */
+  gwsBinary?: string;
+  /** Test injection for the gws process. */
+  gwsRunner?: import("./gws.js").GwsRunner;
 }
 const scopes: Record<GoogleProduct, string[]> = {
   gmail: ["gmail.modify"],

@@ -50,12 +50,12 @@ function fakeGoogle() {
   return remote;
 }
 
-async function fixture(t, product = "gmail") {
+async function fixture(t, product = "gmail", extra = {}) {
   const s = await setup(); t.after(s.cleanup);
   const remote = fakeGoogle(), file = join(s.directory, "google-oauth.json");
   writeFileSync(file, JSON.stringify({ web: { client_id: "client-id", client_secret: "private-client" } }), { mode: 0o600 });
-  const connection = { id: "google", kind: "google", owner: "@alice", settings: { product, clientFile: file } };
-  const options = { redirectUrl: "http://127.0.0.1:18100/oauth/callback", fetch: remote.fetch };
+  const connection = { id: "google", kind: "google", owner: "@alice", settings: { product, clientFile: file, ...extra.settings } };
+  const options = { redirectUrl: "http://127.0.0.1:18100/oauth/callback", fetch: remote.fetch, ...extra.options };
   const connector = googleConnector(options), sealer = new Sealer(s.sealingKey);
   const service = new ConnectorService({ connectors: [connector], connections: [connection], store: s.store, sealer });
   const credentials = {
@@ -330,4 +330,88 @@ test("Gmail label and draft writes need approval; trash/spam labels and attachme
   assert.match(mime, /Bcc: hidden@example.test/); assert.match(mime, /multipart\/alternative/);
   const text = mime.split("Content-Type: text/plain")[1].split("\r\n\r\n")[1].split("\r\n--")[0].replace(/\r\n/g, "");
   assert.match(Buffer.from(text, "base64").toString(), /^Thanks\n\nOn Wed, 05 Nov 2025, news@example.test wrote:\n> /);
+});
+
+/** A stand-in for the official gws binary: Discovery answers for a few methods, and a record of every run. */
+function fakeGws() {
+  const runs = [];
+  const methods = {
+    "gmail.users.messages.list": ["GET", ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]],
+    "gmail.users.messages.get": ["GET", ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]],
+    "gmail.users.messages.send": ["POST", ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"]],
+    "gmail.users.drafts.create": ["POST", ["https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/gmail.modify"]],
+  };
+  const runner = async (args, env) => {
+    runs.push({ args, token: env.GOOGLE_WORKSPACE_CLI_TOKEN, home: env.HOME });
+    if (args[0] === "schema") {
+      const found = methods[args[1]];
+      return found ? { code: 0, stdout: JSON.stringify({ httpMethod: found[0], scopes: found[1] }), stderr: "" } : { code: 3, stdout: "", stderr: "unknown method" };
+    }
+    if (args.includes("--help")) return { code: 0, stdout: "  +triage  [Helper] Show unread inbox summary", stderr: "" };
+    if (args[1] === "+read") return { code: 0, stdout: "x".repeat(70_000), stderr: "" };
+    return { code: 0, stdout: `ran ${args.join(" ")}`, stderr: "" };
+  };
+  return { runs, runner };
+}
+
+test("gws commands run with the access token only after credential-free classification; writes need approval", async (t) => {
+  const gws = fakeGws();
+  const s = await fixture(t, "gmail", { options: { gwsRunner: gws.runner } });
+  await s.authorize();
+  const tools = (await s.connector.discover({ connection: s.connection, credentials: s.credentials, signal: signal() })).map((tool) => [tool.name, tool.risk]);
+  assert.deepEqual(tools.slice(0, 2), [["gws_read", "read"], ["gws_write", "write"]]);
+  const triage = await s.call("gws_read", { args: ["gmail", "+triage", "--max", "5"] });
+  assert.equal(triage.status, "completed"); assert.equal(triage.result.output, "ran gmail +triage --max 5");
+  assert.deepEqual(gws.runs.map((run) => [run.args[0], run.token]), [["schema", undefined], ["gmail", "private-access"]]);
+  assert.deepEqual(gws.runs[0].args, ["schema", "gmail.users.messages.list"]);
+  // Every call gets its own empty configuration directory.
+  assert.notEqual(gws.runs[0].home, gws.runs[1].home);
+  // Help and schema need no credentials.
+  gws.runs.length = 0;
+  assert.equal((await s.call("gws_read", { args: ["gmail", "--help"] })).status, "completed");
+  assert.equal((await s.call("gws_read", { args: ["schema", "gmail.users.messages.send"] })).status, "completed");
+  assert.ok(gws.runs.every((run) => run.token === undefined));
+  // A write is pointed to gws_write without running; gws_write waits for the owner.
+  gws.runs.length = 0;
+  const send = ["gmail", "+send", "--to", "reader@example.test", "--subject", "It's done", "--body", "hello"];
+  assert.equal((await s.call("gws_read", { args: send })).error, "gws_command_requires_write_tool");
+  assert.ok(gws.runs.every((run) => run.args[0] === "schema"));
+  const pending = await s.call("gws_write", { args: send });
+  assert.equal(pending.status, "approval_required");
+  const operation = await s.service.operation(pending.operationId);
+  assert.match(operation.summary, /gws gmail \+send --to reader@example.test --subject 'It'\\''s done' --body hello/);
+  assert.ok(!gws.runs.some((run) => run.token));
+  const done = await s.approve(pending);
+  assert.equal(done.status, "completed"); assert.equal(gws.runs.at(-1).token, "private-access");
+  assert.equal(gws.runs.at(-1).args[1], "+send");
+  // Large output is cut with guidance.
+  const read = await s.call("gws_read", { args: ["gmail", "+read", "--id", "m-1"] });
+  assert.match(read.result.output, /…\[truncated: 10000 more characters; narrow the request/);
+});
+
+test("gws refuses other services, local files, streams and unknown helpers, and writes the granted scopes cannot do", async (t) => {
+  const gws = fakeGws();
+  const s = await fixture(t, "gmail", { options: { gwsRunner: gws.runner }, settings: { scopes: ["https://www.googleapis.com/auth/gmail.readonly"] } });
+  await s.authorize();
+  for (const [args, error] of [
+    [["drive", "files", "list"], "gws_service_not_connected"],
+    [["schema", "drive.files.list"], "gws_command_not_allowed"],
+    [["gmail", "+watch"], "gws_command_not_allowed"],
+    [["gmail", "+mystery"], "gws_command_not_allowed"],
+    [["gmail", "+send", "--to", "a@example.test", "--subject", "s", "--body", "b", "-a", "/etc/passwd"], "gws_flag_not_allowed"],
+    [["gmail", "users", "messages", "get", "--params", "{}", "--output=/tmp/x"], "gws_flag_not_allowed"],
+    [["gmail", "users", "messages", "nosuch"], "gws_method_unknown"],
+    // Read-only consent: a send is refused before any approval card exists.
+    [["gmail", "+send", "--to", "a@example.test", "--subject", "s", "--body", "b"], "google_scope_not_granted"],
+  ]) assert.equal((await s.call("gws_read", { args })).error, error, args.join(" "));
+  assert.ok(gws.runs.every((run) => run.token === undefined));
+  // A dry run only prints the request, so it is a read even for a sending helper.
+  assert.equal((await s.call("gws_read", { args: ["gmail", "+send", "--to", "a@example.test", "--subject", "s", "--body", "b", "--dry-run"] })).error, "google_scope_not_granted");
+  assert.equal((await s.call("gws_read", { args: ["gmail", "users", "messages", "list", "--params", "{\"maxResults\":3}"] })).status, "completed");
+});
+
+test("without a gws binary the Google tools are unchanged", async (t) => {
+  const s = await fixture(t); await s.authorize();
+  const names = (await s.connector.discover({ connection: s.connection, credentials: s.credentials, signal: signal() })).map((tool) => tool.name);
+  assert.ok(!names.includes("gws_read") && names.includes("get_thread"));
 });
