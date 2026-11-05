@@ -1,10 +1,5 @@
 export function readRequest(value, principal) {
   if(!value || value.agentId!==principal.agentId || value.owner!==principal.owner)throw Error('identity_not_allowed');
-  if(value.kind==='business') {
-    if(!['tools','catalog','schema','rows','novel_chapters','novel_production','outline_novel','script_content'].includes(value.tool))throw Error('tool_not_allowed');
-    if(value.arguments===null||typeof value.arguments!=='object'||Array.isArray(value.arguments))throw Error('arguments_invalid');
-    return {kind:value.kind,tool:value.tool,arguments:value.arguments};
-  }
   if(value.kind==='feishu' && Array.isArray(value.args) && value.args.length>0 && value.args.length<=100 && value.args.every(x=>typeof x==='string'&&x.length<=100000))return {kind:value.kind,args:value.args};
   throw Error('tool_not_allowed');
 }

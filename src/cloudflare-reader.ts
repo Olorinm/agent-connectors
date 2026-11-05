@@ -1,10 +1,8 @@
 /** Private entry point for the trusted Cloudflare connector container, never an Agent tool. */
 import { mkdirSync, writeFileSync, rmSync, statfsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { BusinessDataClient } from './business-data.js';
 import { FeishuBotReader } from './feishu-bot-reader.js';
 
-const allowed = new Set(['catalog', 'schema', 'rows', 'novel_chapters', 'novel_production', 'outline_novel', 'script_content']);
 function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.slice(0, 100).map(redact);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k,v]) =>
@@ -25,18 +23,7 @@ async function main() {
   const directory='/dev/shm/mau-reader-'+randomUUID(); mkdirSync(directory,{mode:0o700});
   try {
     let result: unknown;
-    if(input.kind==='business') {
-      if(!config.business) throw Error('connection_not_allowed');
-      const tokenFile=directory+'/business-token';writeFileSync(tokenFile,config.business.token,{mode:0o600});
-      const client=new BusinessDataClient({endpoint:config.business.endpoint,tokenFile});
-      if(input.tool==='tools') result={isError:false,content:[{type:'text',text:JSON.stringify((await client.tools()).filter(t=>allowed.has(t.name)))}]};
-      else {
-        if(!allowed.has(input.tool)) throw Error('business_tool_not_allowed');
-        const args=input.arguments??{};
-        if(['rows'].includes(input.tool)) for(const key of ['limit','page_size','pageSize']) if(key in args && (!Number.isInteger(args[key])||args[key]<1||args[key]>100)) throw Error('result_limit_exceeded');
-        result=redact(await client.call(input.tool,args));
-      }
-    } else if(input.kind==='feishu') {
+    if(input.kind==='feishu') {
       if(!config.feishu) throw Error('connection_not_allowed');
       const appSecretFile=directory+'/app-secret';writeFileSync(appSecretFile,config.feishu.appSecret,{mode:0o600});
       const reader=new FeishuBotReader({appId:config.feishu.appId,domain:config.feishu.domain,appSecretFile,directory:directory+'/cli'});
@@ -44,7 +31,7 @@ async function main() {
     } else throw Error('unknown_read_kind');
     const text=JSON.stringify(result);
     if(text.length>1000000) throw Error('result_too_large');
-    for(const secret of [config.business?.token,config.feishu?.appSecret].filter(Boolean)) if(text.includes(secret))throw Error('secret_in_result');
+    for(const secret of [config.feishu?.appSecret].filter(Boolean)) if(text.includes(secret))throw Error('secret_in_result');
     process.stdout.write(text);
   } finally { rmSync(directory,{recursive:true,force:true}); }
 }

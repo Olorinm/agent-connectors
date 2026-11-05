@@ -1,6 +1,6 @@
 {
   "name": "@olorinm/agent-connectors",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0-alpha.7",
   "description": "Business connectors for Agents: credentials, server-side authorization and approval-bound writes behind MCP",
   "type": "module",
   "license": "MIT",
@@ -34,10 +34,6 @@
     "./issuer": {
       "types": "./dist/issuer.d.ts",
       "import": "./dist/issuer.js"
-    },
-    "./business-data": {
-      "types": "./dist/business-data.d.ts",
-      "import": "./dist/business-data.js"
     },
     "./feishu-bot-reader": {
       "types": "./dist/feishu-bot-reader.d.ts",
