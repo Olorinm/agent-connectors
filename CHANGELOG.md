@@ -18,9 +18,8 @@ PR: [#9](https://github.com/Olorinm/agent-connectors/pull/9)
 
 ## [0.1.0-alpha.7] - 2026-11-05
 
-- Removed the business-data read adapter (`@olorinm/agent-connectors/business-data`) and the
-  business branch of the Cloudflare read broker. The broker and `FeishuBotReader` remain, for
-  Feishu reads only.
+- Removed the `business-data` read adapter. The Cloudflare read broker now serves Feishu reads
+  only.
 
 PR: [#8](https://github.com/Olorinm/agent-connectors/pull/8)
 
