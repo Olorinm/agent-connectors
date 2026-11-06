@@ -23,6 +23,9 @@ const MAX_MCP_BODY = 15_000_000;
  *   POST /mcp                          Agent tools (caller token)
  *   GET  /v1/operations                pending operations (service token)
  *   GET  /v1/operations/:id            one operation, for the approval screen (service token)
+ *   GET  /v1/connections[/:id]         account status (service token)
+ *   POST /v1/connections/:id/connect|disconnect|complete   (service token)
+ *   POST /v1/connections/:id/application   product hand-over of application configuration (service token)
  *   POST /v1/operations/:id/approve    {grant} — the grant itself authorizes execution
  *   POST /v1/operations/:id/deny       (service token)
  *   GET  /v1/health
@@ -59,8 +62,11 @@ async function handle(options: HttpOptions, request: IncomingMessage, response: 
     const signal = AbortSignal.timeout(60_000);
     if (path.length === 2 && request.method === "GET") return reply(response, 200, { connections: await options.service.connections(signal) });
     if (path.length === 3 && request.method === "GET") return reply(response, 200, await options.service.account(path[2]!, "status", signal));
-    if (path.length === 4 && request.method === "POST" && ["connect", "disconnect"].includes(path[3]!))
-      return reply(response, 200, await options.service.account(path[2]!, path[3] as "connect" | "disconnect", signal));
+    if (path.length === 4 && request.method === "POST" && ["connect", "disconnect", "complete"].includes(path[3]!))
+      return reply(response, 200, await options.service.account(path[2]!, path[3] as "connect" | "disconnect" | "complete", signal));
+    // The product hands over application configuration it already holds; secrets are accepted, never returned.
+    if (path.length === 4 && request.method === "POST" && path[3] === "application")
+      return reply(response, 200, await options.service.account(path[2]!, "configure", signal, await body(request)));
   }
   if (url.pathname === "/mcp") {
     if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");

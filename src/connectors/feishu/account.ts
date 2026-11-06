@@ -1,7 +1,7 @@
 // Adapted from Agent Router (MIT, Agent Router contributors): src/services/feishu/cli.ts.
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -23,6 +23,40 @@ export function loadFeishuCredentials(path: string) {
   const appSecret = readFileSync(resolve(directory, credentials.appSecretFile), "utf8").trim();
   if (!appSecret) throw new Error("empty_feishu_app_secret");
   return { credentials, directory, appSecret };
+}
+export type FeishuState = "connected" | "authorization_required" | "expired" | "verification_failed" | "owner_mismatch" | "application_mismatch";
+export interface FeishuStatus {
+  appId: string; ownerOpenId: string; authorized: boolean; verified: boolean; userName: string; scope: string[];
+  /** Product-facing state; `reason` explains `expired`. */
+  state: FeishuState; reason?: string;
+  /** The CLI's own user status, kept for diagnostics. */
+  status: string;
+}
+export const feishuApplicationSchema = z.object({
+  appId: z.string().regex(/^cli_[a-zA-Z0-9_]{1,128}$/), appSecret: z.string().regex(/^[\x21-\x7e]{1,512}$/),
+  domain: z.enum(["feishu", "lark"]), ownerOpenId: z.string().regex(/^ou_[a-zA-Z0-9_-]{1,128}$/),
+}).strict();
+export type FeishuApplication = z.infer<typeof feishuApplicationSchema>;
+
+/**
+ * Installs an application the product already created (for example the bot that Router's chat channel uses) into a
+ * connection directory. The same app and owner keep the owner's existing authorization; a different app or owner
+ * removes the previous CLI configuration and user tokens, which belonged to the old identity.
+ */
+export function installFeishuApplication(directory: string, application: FeishuApplication): { changed: boolean } {
+  const credentialsFile = join(directory, "credentials.json");
+  let changed = true;
+  if (existsSync(credentialsFile)) {
+    const current = feishuCredentialsSchema.safeParse(JSON.parse(readFileSync(credentialsFile, "utf8")));
+    changed = !current.success || current.data.appId !== application.appId || current.data.domain !== application.domain ||
+      current.data.ownerOpenId !== application.ownerOpenId;
+  }
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (changed) for (const name of ["lark-cli", "cli-data", "home", "workspace", "authorization.json", "authorized.json"])
+    rmSync(join(directory, name), { recursive: true, force: true });
+  privateFile(join(directory, "app-secret"), application.appSecret);
+  privateFile(credentialsFile, { version: 1, appId: application.appId, appSecretFile: "app-secret", domain: application.domain, ownerOpenId: application.ownerOpenId });
+  return { changed };
 }
 export interface CliResult { code: number; stdout: string; stderr: string; }
 export type CliRunner = (args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeout: number }) => Promise<CliResult>;
@@ -87,17 +121,41 @@ export class FeishuAccount {
     });
     this.queue = operation.catch(() => {}); return operation;
   }
-  async status(verify = false) {
+  async status(verify = false): Promise<FeishuStatus> {
     const output = await this.command(["auth", "status", "--json", ...(verify ? ["--verify"] : [])]);
     const value = json(output), user = value.identities?.user;
     const appMatches = value.appId === this.credentials.appId;
     const ownerMatches = user?.openId === this.credentials.ownerOpenId;
-    return { appId: this.credentials.appId, ownerOpenId: this.credentials.ownerOpenId,
-      authorized: output.code === 0 && appMatches && ownerMatches && user?.available === true && !["expired", "missing", "invalid", "revoked"].includes(user?.tokenStatus),
-      verified: verify && value.verified === true && user?.verified === true && appMatches && ownerMatches,
+    const tokenStatus = String(user?.tokenStatus ?? ""), message = String(user?.message ?? "");
+    const authorized = output.code === 0 && appMatches && ownerMatches && user?.available === true && !["expired", "missing", "invalid", "revoked"].includes(tokenStatus);
+    const verified = verify && value.verified === true && user?.verified === true && appMatches && ownerMatches;
+    // The CLI reports a lost user token as `missing`, like one that never existed; the local marker tells them apart.
+    if (authorized && ownerMatches && !existsSync(this.markerFile)) privateFile(this.markerFile, { openId: this.credentials.ownerOpenId, at: new Date().toISOString() });
+    const previously = existsSync(this.markerFile);
+    let state: FeishuState, reason: string | undefined;
+    if (!appMatches) state = "application_mismatch";
+    else if (user?.available && !ownerMatches) state = "owner_mismatch";
+    else if (authorized) state = verify && !verified ? "verification_failed" : "connected";
+    else if (previously) {
+      state = "expired";
+      reason = /refresh token expired/i.test(message) || tokenStatus === "expired" ? "refresh_token_expired"
+        : ["invalid", "revoked"].includes(tokenStatus) ? "token_revoked" : "authorization_lost";
+    } else state = "authorization_required";
+    return { appId: this.credentials.appId, ownerOpenId: this.credentials.ownerOpenId, authorized, verified,
       userName: ownerMatches ? String(user?.userName ?? "") : "", scope: ownerMatches ? String(user?.scope ?? "").split(/\s+/).filter(Boolean) : [],
+      state, ...(reason ? { reason } : {}),
       status: !appMatches ? "application_mismatch" : user?.available && !ownerMatches ? "owner_mismatch" : String(user?.status ?? "not_authorized"),
     };
+  }
+  /** Set after the owner's authorization was verified once; distinguishes expiry from never authorized. */
+  get markerFile() { return join(this.directory, "authorized.json"); }
+  /** A pending device authorization the owner has not finished yet. */
+  pending(): { verificationUrl: string; expiresAt: string } | undefined {
+    const path = join(this.directory, "authorization.json");
+    if (!existsSync(path)) return undefined;
+    const pending = pendingSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+    if (!pending.success || pending.data.expiresAt <= Date.now()) return undefined;
+    return { verificationUrl: pending.data.verificationUrl, expiresAt: new Date(pending.data.expiresAt).toISOString() };
   }
   private authorize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.authorizationQueue.then(operation);
@@ -121,6 +179,7 @@ export class FeishuAccount {
       const result = await this.command(["auth", "logout", "--json"]);
       if (result.code !== 0) throw new Error("feishu_logout_failed");
       this.clearPending();
+      rmSync(this.markerFile, { force: true });
       return { status: "disconnected" };
     });
   }
@@ -134,6 +193,7 @@ export class FeishuAccount {
     const status = await this.status(true);
     if (!status.authorized || !status.verified) throw new Error(status.status === "owner_mismatch" ? "feishu_authorized_wrong_owner" : "feishu_authorization_verification_failed");
     this.clearPending();
+    privateFile(this.markerFile, { openId: this.credentials.ownerOpenId, at: new Date().toISOString() });
     return status;
   }
   private clearPending() { const path = join(this.directory, "authorization.json"); if (existsSync(path)) unlinkSync(path); }

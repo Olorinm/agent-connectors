@@ -11,7 +11,9 @@ import { startConfigured } from "./start-configured.js";
 
 const usage = `agent-connectors serve --config <file>
 agent-connectors init --out <new-directory> --owner <owner-id> [--redirect-url <url>]
-agent-connectors connection <status|connect|disconnect> [id] --config <file> --authority-key <private.jwk.json> [--url <service-url>]
+agent-connectors connection <status|connect|complete|disconnect> [id] --config <file> --authority-key <private.jwk.json> [--url <service-url>]
+agent-connectors connection application <id> --app-id <cli_...> --app-secret-file <file> --domain <feishu|lark> --owner-open-id <ou_...> --config <file> --authority-key <file>
+                                                      install an existing Feishu app (e.g. the chat bot's) for owner authorization
 agent-connectors init-key <file>                      create the 32-byte sealing key (0600)
 agent-connectors keygen --kid <id> --out <directory>  Ed25519 pair for Router: private.jwk.json (0600) + public.jwks.json
 agent-connectors credential set <connectionId> --config <file>   read JSON credentials from stdin
@@ -81,7 +83,7 @@ switch (command) {
   }
   case "connection": {
     const [action, candidateId] = args;
-    if (!["status", "connect", "disconnect"].includes(action ?? "")) throw new Error(usage);
+    if (!["status", "connect", "complete", "disconnect", "application"].includes(action ?? "")) throw new Error(usage);
     const id = candidateId?.startsWith("--") ? undefined : candidateId;
     if (action !== "status" && !id) throw new Error("connection_id_required");
     const config = loadConfig(option(args, "--config"));
@@ -95,8 +97,11 @@ switch (command) {
     const url = new URL(`/v1/connections${id ? `/${encodeURIComponent(id)}` : ""}${action === "status" ? "" : `/${action}`}`, base);
     if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(url.hostname)))
       throw new Error("service_url_must_be_https_or_loopback");
-    const response = await fetch(url, { method: action === "status" ? "GET" : "POST", headers: { Authorization: `Bearer ${token}` },
-      redirect: "error", signal: AbortSignal.timeout(65_000) });
+    const application = action === "application" ? JSON.stringify({ appId: option(args, "--app-id"),
+      appSecret: readFileSync(option(args, "--app-secret-file"), "utf8").trim(), domain: option(args, "--domain"), ownerOpenId: option(args, "--owner-open-id") }) : undefined;
+    const response = await fetch(url, { method: action === "status" ? "GET" : "POST",
+      headers: { Authorization: `Bearer ${token}`, ...(application ? { "Content-Type": "application/json" } : {}) },
+      ...(application ? { body: application } : {}), redirect: "error", signal: AbortSignal.timeout(65_000) });
     console.log(JSON.stringify(await response.json(), null, 2));
     if (!response.ok) process.exitCode = 1;
     break;

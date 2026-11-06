@@ -25,12 +25,16 @@ The trusted Router can use these endpoints with an authority-signed **service to
 | GET | `/v1/connections/:id` | Configuration/authorization status; verifies upstream when authorized |
 | POST | `/v1/connections/:id/connect` | Owner consent URL, or a configuration-required status |
 | POST | `/v1/connections/:id/disconnect` | Clears local authorization and denies pending writes |
+| POST | `/v1/connections/:id/complete` | Finishes a device-flow consent (Feishu) and returns status |
+| POST | `/v1/connections/:id/application` | Hands over an app the product already created (Feishu); see [Feishu](feishu.md#one-app-for-chat-and-tools) |
 
 Router must authenticate the owner and check ownership before invoking these service-wide management endpoints.
 Present consent links only to that owner. Do not give the Agent a service token or expose an endpoint that accepts
 arbitrary owner IDs from the Agent. Provider tokens and PKCE verifiers are never returned.
 The browser returns directly to the connector's configured `GET /oauth/callback` (single-use, expiring state).
-Feishu uses the CLI's device flow; a later status check completes consent.
+Feishu uses the CLI's device flow; `complete` or a later status check completes consent.
+Connections whose listing has `usage: "owner_private"` act as the owner: admit their calls only from the owner's
+private conversation.
 
 After successful connection, ask the native Host client to refresh `tools/list` or reconnect the MCP session.
 Tool lists are prepared per owner; GitHub/Notion upstream schemas are filtered by the local capability catalog,

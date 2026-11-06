@@ -4,6 +4,18 @@ Notable changes to Agent Connectors, newest first. Each version has a GitHub Rel
 notes and the package archive. When releasing, add the new section here in the version-bump commit;
 the Release notes are copied from it.
 
+## [0.1.0-alpha.9] - 2026-11-06
+
+- Feishu owner tools on a product-provided app (the same app a chat channel's bot uses).
+  - `POST /v1/connections/:id/application` installs `appId`, app secret, domain and owner `open_id`; the secret is
+    never returned. Same app and owner keep the authorization; a different one resets it.
+  - `POST /v1/connections/:id/complete` finishes the owner's device-flow authorization.
+  - Status `expired` with `reason` (`refresh_token_expired`, `token_revoked`, `authorization_lost`) and
+    `authorization_pending` with the consent link.
+  - Tool errors for missing or expired authorization carry `state`, a re-authorization message and the consent link.
+  - Connection listings include `usage: "owner_private"` so products can admit these tools only in the owner's
+    private conversation.
+
 ## [0.1.0-alpha.8] - 2026-11-05
 
 - Google through the official Google Workspace CLI (`gws`).

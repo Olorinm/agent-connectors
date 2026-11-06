@@ -83,8 +83,8 @@ Existing `kind: "google"` configuration IDs, `product`, `clientFile`, and option
 The old preview-MCP credential envelope is deliberately not reused; reconnect any previously authorized Google
 connection. Tool names/arguments now follow the local typed API adapters; refresh the Agent's tool list.
 
-For Feishu, either point `settings.directory` at an existing Router account directory, or create
-`state/feishu/credentials.json`:
+For Feishu, let the product hand over the app its chat bot uses (`POST /v1/connections/:id/application`, see
+[Feishu](feishu.md#one-app-for-chat-and-tools)), or create `state/feishu/credentials.json`:
 
 ```json
 {
@@ -97,8 +97,8 @@ For Feishu, either point `settings.directory` at an existing Router account dire
 ```
 
 Place the secret alone in `state/feishu/app-secret`. Keep the directory `0700`, both files `0600`.
-The CLI checks that authorization belongs to this expected owner. See [Feishu](feishu.md) for reuse of
-Router's existing configuration and its separate token storage.
+The CLI checks that authorization belongs to this expected owner. See [Feishu](feishu.md) for one app serving
+both a chat channel and these tools.
 
 ## Connect and inspect
 
@@ -130,7 +130,8 @@ Important statuses:
 | --- | --- |
 | `oauth_callback_not_configured` | Set the service callback URL |
 | `oauth_client_not_configured` / `oauth_client_file_missing_or_invalid` | Operator must provide application credentials |
-| `feishu_configuration_required` | Provide the Feishu directory and expected owner |
+| `feishu_configuration_required` | Provide the Feishu directory and expected owner, or hand over the product's app (`reason: application_not_provided`) |
+| `expired` | Feishu: worked before, needs re-authorization; `reason` says why |
 | `authorization_required` / `authorization_pending` | Owner consent is absent or incomplete |
 | `connected` | GitHub/Notion passed MCP initialization and tool listing, Feishu verified the owner, or Google verified its OAuth token |
 | `upstream_access_denied` / `google_api_access_denied` | Upstream rejected access; check enabled APIs, scopes and organization policy |

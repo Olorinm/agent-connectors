@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Json } from "../../canonical.js";
 import { ConnectorError, type ConnectionConfig, type Connector, type ToolDefinition } from "../../connector.js";
-import { FeishuAccount, loadFeishuCredentials, runOfficialCli, type CliResult, type CliRunner } from "./account.js";
+import { FeishuAccount, feishuApplicationSchema, installFeishuApplication, loadFeishuCredentials, runOfficialCli, type CliResult, type CliRunner } from "./account.js";
 import { ArgumentsError, UnconfiguredCli, checkArguments, guidanceArgs, withFlags } from "./classify.js";
 
 const MAX_FILES_BYTES = 20_000_000;
@@ -39,11 +39,11 @@ export interface FeishuOptions {
 export function feishuConnector(options: FeishuOptions = {}): Connector {
   const withSecrets = options.withSecretFiles ?? (<T>(operation: () => Promise<T>) => operation());
   const accounts = new Map<string, FeishuAccount>();
+  const directoryOf = (connection: ConnectionConfig) => resolve(options.baseDirectory ?? ".", settings.parse(connection.settings ?? {}).directory);
   const account = (connection: ConnectionConfig) => {
     let existing = accounts.get(connection.id);
     if (!existing) {
-      const { directory } = settings.parse(connection.settings ?? {});
-      const loaded = loadFeishuCredentials(join(resolve(options.baseDirectory ?? ".", directory), "credentials.json"));
+      const loaded = loadFeishuCredentials(join(directoryOf(connection), "credentials.json"));
       existing = new FeishuAccount(loaded.credentials, loaded.directory, options.runner ?? runOfficialCli);
       accounts.set(connection.id, existing);
     }
@@ -87,15 +87,48 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
       return withSecrets(() => run(account(connection), value, { write: true, flags }));
     },
   };
-  return { kind: "feishu", tools: [read, write], account: {
+  const report = async (feishu: FeishuAccount): Promise<Json> => {
+    const status = await feishu.status(true), pending = feishu.pending();
+    const { status: cliStatus, state, ...rest } = status;
+    // A pending re-authorization keeps the reason it was needed.
+    const current = state !== "connected" && pending ? "authorization_pending" : state;
+    return { ...rest, status: current, cliStatus, ownerPrivate: true,
+      ...(current === "authorization_pending" ? { authorizationUrl: pending!.verificationUrl, expiresAt: pending!.expiresAt } : {}) };
+  };
+  return { kind: "feishu", usage: "owner_private", tools: [read, write], account: {
     async status({ connection }): Promise<Json> {
       return withSecrets(async (): Promise<Json> => {
       let feishu: FeishuAccount;
       try { feishu = account(connection); }
-      catch { return { status: "feishu_configuration_required", required: ["directory/credentials.json", "appSecretFile", "ownerOpenId"] }; }
+      catch { return { status: "feishu_configuration_required", reason: "application_not_provided", ownerPrivate: true,
+        required: ["directory/credentials.json", "appSecretFile", "ownerOpenId"] }; }
       await feishu.pollAuthorization();
-      const status = await feishu.status(true);
-      return { ...status, status: status.authorized && status.verified ? "connected" : status.status };
+      return report(feishu);
+      });
+    },
+    async complete({ connection }): Promise<Json> {
+      return withSecrets(async (): Promise<Json> => {
+        let feishu: FeishuAccount;
+        try { feishu = account(connection); }
+        catch { throw new ConnectorError("feishu_configuration_required"); }
+        try { await feishu.complete(); }
+        catch (error) {
+          // Not confirmed yet, no pending flow, or a lapsed device code: the status below says which.
+          if (error instanceof Error && error.message === "feishu_authorized_wrong_owner") throw new ConnectorError(error.message);
+        }
+        return report(feishu);
+      });
+    },
+    async configure({ connection }, value): Promise<Json> {
+      const parsed = feishuApplicationSchema.safeParse(value);
+      if (!parsed.success) throw new ConnectorError("feishu_application_invalid");
+      return withSecrets(async (): Promise<Json> => {
+        let directory: string;
+        try { directory = directoryOf(connection); }
+        catch { throw new ConnectorError("feishu_configuration_required"); }
+        const { changed } = installFeishuApplication(directory, parsed.data);
+        accounts.delete(connection.id);
+        return { ...(await report(account(connection)) as Record<string, Json>), applicationChanged: changed };
       });
     },
     async connect({ connection }) {
@@ -120,12 +153,26 @@ function check(args: string[]) {
   }
 }
 
+/**
+ * Missing or lapsed personal authorization is reported, never hidden: the result names the state and the action that
+ * restores it (the official consent link, or 飞书 → 重新授权 in the product).
+ */
+async function authorizationRequired(feishu: FeishuAccount, scopes: string[] = [], extra: Record<string, Json> = {}): Promise<never> {
+  const status = await feishu.status().catch(() => undefined);
+  const state = scopes.length && status?.authorized ? "scope_required" : status?.state === "expired" || existsSync(feishu.markerFile) ? "expired" : "authorization_required";
+  throw new ConnectorError("feishu_personal_authorization_required", {
+    state, ...(state === "expired" && status?.reason ? { reason: status.reason } : {}),
+    message: state === "expired" ? "飞书个人权限已过期，需要重新授权。" : state === "scope_required" ? "飞书个人权限缺少此操作所需的权限，需要重新授权。"
+      : "飞书个人权限尚未授权，需要授权后才能使用。",
+    action: "reauthorize", authorizationUrl: await feishu.authorizationLink(scopes), ...extra,
+    instruction: "Tell the owner 需要重新授权: send this exact authorization URL to the owner (or ask them to open 飞书 → 重新授权 in Mau's connectors), " +
+      "then retry after they confirm. Never ask for tokens in chat.",
+  });
+}
+
 async function run(feishu: FeishuAccount, value: Input, { write, flags = [] }: { write: boolean; flags?: string[] }): Promise<Json> {
   await feishu.pollAuthorization();
-  if (!(await feishu.status()).authorized) throw new ConnectorError("feishu_personal_authorization_required", {
-    authorizationUrl: await feishu.authorizationLink(),
-    instruction: "Send this exact authorization URL to the owner, then retry after they confirm.",
-  });
+  if (!(await feishu.status()).authorized) await authorizationRequired(feishu);
   mkdirSync(feishu.workspace, { recursive: true, mode: 0o700 });
   const cwd = mkdtempSync(join(feishu.workspace, "call-"));
   try {
@@ -143,10 +190,8 @@ async function run(feishu: FeishuAccount, value: Input, { write, flags = [] }: {
       const error = officialError(result);
       if ((error?.type === "authentication" || (error?.type === "authorization" && error.subtype === "missing_scope"))) {
         const scopes = z.array(z.string().regex(/^[a-zA-Z0-9_:.-]{1,128}$/)).max(100).safeParse(error.missing_scopes ?? []);
-        throw new ConnectorError("feishu_personal_authorization_required", {
-          authorizationUrl: await feishu.authorizationLink(scopes.success ? scopes.data : []), officialOutput: output.slice(0, 20_000),
-          instruction: "Present this exact consent URL to the owner. Do not replay automatically; inspect partial results before retrying any write.",
-        });
+        await authorizationRequired(feishu, scopes.success ? scopes.data : [], { officialOutput: output.slice(0, 20_000),
+          retry: "Do not replay automatically; inspect partial results before retrying any write." });
       }
       if (!write || result.code === 10 || NO_EFFECT.has(error?.type ?? "")) throw new ConnectorError("lark_cli_failed", { exitCode: result.code, output });
       throw new Error("lark_cli_write_outcome_unknown");

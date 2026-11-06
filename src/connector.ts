@@ -51,14 +51,25 @@ export interface ToolDefinition<Input = any> {
   execute(context: ToolContext, input: Input): Promise<Json>;
 }
 
+/**
+ * owner_private: the tools act as the owner's personal identity. Products must admit calls only from the owner's
+ * private conversation (never groups, other senders or delegated work); this service reports it, products enforce it.
+ */
+export type ConnectionUsage = "owner_private";
+
 export interface Connector {
   kind: string;
   tools: ToolDefinition[];
+  usage?: ConnectionUsage;
   discover?(context: ToolContext): Promise<ToolDefinition[]>;
   account?: {
     status(context: ToolContext): Promise<Json>;
     connect(context: ToolContext): Promise<Json>;
     disconnect(context: ToolContext): Promise<Json>;
+    /** Finishes a consent flow that has no browser callback (device flow). */
+    complete?(context: ToolContext): Promise<Json>;
+    /** Trusted product hand-over of application configuration; never returns secrets. */
+    configure?(context: ToolContext, input: unknown): Promise<Json>;
     /** Returns false for a state belonging to another connection. */
     callback?(context: ToolContext, state: string, code?: string): Promise<boolean>;
   };

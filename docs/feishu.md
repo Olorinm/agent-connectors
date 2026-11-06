@@ -67,6 +67,42 @@ See [production encryption](security-model.md#production-encryption) for import 
 The directory must never be reachable from an Agent environment. If the same Feishu app also serves
 Router's bot channel, Router has its own app-secret storage, which needs separate protection.
 
-Authorization: when the owner has not authorized (or a scope is missing), tools fail with
-`feishu_personal_authorization_required` and the official consent URL; the next call completes a pending
-authorization automatically.
+## One app for chat and tools
+
+A product can run Feishu as a chat channel (bot identity, for example Router) and as these tools (the owner's user
+identity) on the **same** app. The product hands the app it already created to this service; the owner then
+authorizes their user identity on that app. No second app is created.
+
+`POST /v1/connections/:id/application` (service token) with
+`{ "appId": "cli_…", "appSecret": "…", "domain": "feishu" | "lark", "ownerOpenId": "ou_…" }` writes
+`credentials.json` and `app-secret` into the connection's `directory` (the connection itself is configured as above).
+The secret is accepted, never returned. Handing over the same app and owner again keeps the owner's authorization
+(a rotated secret is replaced); a different app or owner removes the previous CLI configuration and user tokens.
+Operators can do the same with `connection application <id> --app-id … --app-secret-file … --domain … --owner-open-id …`.
+
+Then `POST …/connect` starts the official device flow (`lark-cli auth login --no-wait`) and returns the consent URL;
+`POST …/complete` (or any status check) finishes it once the owner has confirmed. The CLI refreshes access tokens
+itself; refreshed files are saved like every other CLI change.
+
+## Status
+
+| `status` | Meaning |
+| --- | --- |
+| `feishu_configuration_required` (`reason: application_not_provided`) | No app handed over yet |
+| `authorization_required` | The owner has never authorized on this app |
+| `authorization_pending` | A device flow is waiting for the owner (`authorizationUrl`, `expiresAt`) |
+| `connected` | The owner's identity is verified with the server |
+| `expired` | It worked before and no longer does; `reason`: `refresh_token_expired`, `token_revoked` or `authorization_lost` |
+| `verification_failed` | A token exists but the server check failed (network or revoked); check again |
+| `owner_mismatch` / `application_mismatch` | The CLI holds another user or app |
+
+Connection listings include `usage: "owner_private"` for Feishu: its tools act as the owner, so a product must admit
+calls only from the owner's private conversation, never groups, other senders or delegated work. This service cannot
+see conversations; the product enforces it where it admits connector calls.
+
+## Missing or expired authorization
+
+Tools stay listed. A call fails with `feishu_personal_authorization_required` and `detail`:
+`state` (`authorization_required`, `expired` with `reason`, or `scope_required`), a `message` saying re-authorization
+is needed (需要重新授权), `action: "reauthorize"`, and the official `authorizationUrl` of a device flow it started.
+The next status check or call completes that flow after the owner confirms.
