@@ -115,22 +115,29 @@ export class ConnectorService {
   async connections(signal: AbortSignal): Promise<Json[]> {
     return Promise.all([...this.#connections.values()].map(async (c) => ({
       id: c.id, kind: c.kind, owner: c.owner, label: c.label ?? c.id,
+      ...(this.#connectors.get(c.id)?.usage ? { usage: this.#connectors.get(c.id)!.usage! } : {}),
       account: this.#connectors.get(c.id)?.account ? await this.account(c.id, "status", signal) : { status: "account_management_unavailable" },
     })));
   }
 
   /** Trusted management only; not exposed as an Agent tool. */
-  async account(id: string, action: "status" | "connect" | "disconnect", signal: AbortSignal): Promise<Json> {
+  async account(id: string, action: "status" | "connect" | "disconnect" | "complete" | "configure", signal: AbortSignal, input?: unknown): Promise<Json> {
     const connection = this.#connections.get(id), connector = this.#connectors.get(id);
     if (!connection || !connector?.account) throw new ServiceError("connection_account_unavailable", 404);
-    if (action !== "status") {
+    const account = connector.account;
+    if ((action === "complete" && !account.complete) || (action === "configure" && !account.configure))
+      throw new ServiceError("connection_action_unsupported", 404);
+    if (action !== "status" && action !== "complete") {
       // Old approvals may not be used against a newly linked external account.
       for (const row of this.options.store.operations("pending"))
         if (row.connectionId === id) this.options.store.transition(row.id, "pending", "denied", this.#now());
       this.#clearDiscovered(connection);
     }
     try {
-      return await connector.account[action]({ connection, credentials: this.#credentials(id), signal });
+      const context = { connection, credentials: this.#credentials(id), signal };
+      if (action === "configure") return await account.configure!(context, input);
+      if (action === "complete") return await account.complete!(context);
+      return await account[action](context);
     } catch (error) {
       if (error instanceof ConnectorError) return { status: error.code, ...(error.detail ? { detail: error.detail } : {}) };
       return { status: "connection_check_failed" };

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { ConnectorService, Sealer, feishuConnector } from "../dist/index.js";
+import { ConnectorService, Sealer, feishuConnector, loadConfig, start } from "../dist/index.js";
 import { UnconfiguredCli } from "../dist/connectors/feishu/classify.js";
 import { runOfficialCli } from "../dist/connectors/feishu/account.js";
 import { setup, signal } from "./fixture.mjs";
@@ -13,6 +13,8 @@ const alice = { agentId: "agent-a", owner: "@alice", connections: ["work-feishu"
 /** Fake lark-cli: answers --help=true from the risk table and records every other invocation. */
 function fakeCli({ authorized = true } = {}) {
   const calls = [];
+  // Mutable account state: "valid", "missing" (never logged in), "expired" (refresh token lapsed); `consent` completes a device flow.
+  const auth = { user: authorized ? "valid" : "missing", consent: false, appId: "cli_app", ownerOpenId: "ou_owner" };
   const runner = async (args, { cwd, env }) => {
     const call = { args, cwd, configDir: env.LARKSUITE_CLI_CONFIG_DIR, files: existsSync(cwd) ? readdirSync(cwd) : [] };
     calls.push(call);
@@ -29,8 +31,19 @@ function fakeCli({ authorized = true } = {}) {
     }
     if (args[0] === "skills") return { code: 0, stdout: "skill text", stderr: "" };
     const words = args.filter((a) => !a.startsWith("-"));
-    if (words[0] === "auth" && words[1] === "status") return { code: 0, stdout: JSON.stringify({ appId: "cli_app", identities: { user: authorized ? { openId: "ou_owner", available: true, tokenStatus: "valid" } : undefined } }), stderr: "" };
+    if (words[0] === "auth" && words[1] === "status") {
+      const profile = args.find((a) => a.startsWith("--profile="))?.slice(10);
+      const user = auth.user === "valid" ? { status: "ready", openId: auth.ownerOpenId, userName: "Alice", available: true, tokenStatus: "valid", verified: true, scope: "mail:read" }
+        : auth.user === "expired" ? { status: "missing", available: false, message: "User identity: missing (refresh token expired)" }
+        : { status: "missing", available: false, message: "User identity: missing (no user logged in)" };
+      return { code: 0, stdout: JSON.stringify({ appId: profile, identities: { user }, ...(args.includes("--verify") && auth.user === "valid" ? { verified: true } : {}) }), stderr: "" };
+    }
+    if (words[0] === "auth" && words[1] === "login" && args.includes("--device-code")) {
+      if (!auth.consent) return { code: 1, stdout: "", stderr: '{"ok":false,"error":{"type":"authorization_pending"}}' };
+      auth.user = "valid"; return { code: 0, stdout: '{"ok":true}', stderr: "" };
+    }
     if (words[0] === "auth" && words[1] === "login") return { code: 0, stdout: JSON.stringify({ device_code: "dc", verification_url: "https://open.feishu.cn/consent", expires_in: 600 }), stderr: "" };
+    if (words[0] === "auth" && words[1] === "logout") { auth.user = "missing"; return { code: 0, stdout: '{"ok":true}', stderr: "" }; }
     const command = args.filter((a) => !a.startsWith("-")).slice(0, 2).join(" ");
     if (command === "drive +download") {
       writeFileSync(join(cwd, "invoice.pdf"), "%PDF-1.7 fake");
@@ -40,7 +53,7 @@ function fakeCli({ authorized = true } = {}) {
     if (command === "mail +boom") return { code: 1, stdout: "", stderr: '{"ok":false,"error":{"type":"api_error"}}' };
     return { code: 0, stdout: '{"ok":true}', stderr: "" };
   };
-  return { calls, runner, executed: () => calls.filter((c) => !c.args.includes("--help=true") && !c.args.includes("--dry-run=true") && c.args[0] !== "auth") };
+  return { calls, runner, auth, executed: () => calls.filter((c) => !c.args.includes("--help=true") && !c.args.includes("--dry-run=true") && c.args[0] !== "auth") };
 }
 
 async function feishu(t, options) {
@@ -221,4 +234,116 @@ test("the approval summary shows invisible characters as escapes", async (t) => 
   const f = await feishu(t);
   const pending = await f.call("cli_write", ["im", "+messages-send", "--text", "pay \u202Eevil\u200B"]);
   assert.ok(pending.summary.includes("\\u202e") && pending.summary.includes("\\u200b") && !/[\u202E\u200B]/.test(pending.summary), pending.summary);
+});
+
+/** A connection configured without an application: the product hands over the app its chat bot already uses. */
+async function handover(t) {
+  const s = await setup(); t.after(s.cleanup);
+  const cli = fakeCli({ authorized: false });
+  const connector = feishuConnector({ runner: cli.runner, baseDirectory: s.directory, classifierDirectory: join(s.directory, "classifier") });
+  const service = new ConnectorService({ connectors: [connector], store: s.store, sealer: new Sealer(s.sealingKey),
+    connections: [{ id: "owner-feishu", kind: "feishu", owner: "@alice", settings: { directory: "feishu/alice" } }] });
+  const account = (action, input) => service.account("owner-feishu", action, signal(), input);
+  const call = (tool, args) => service.call({ ...alice, connections: ["owner-feishu"] }, `owner_feishu__${tool}`, { args }, signal());
+  return { ...s, cli, service, account, call, directory: join(s.directory, "feishu", "alice") };
+}
+const application = { appId: "cli_app", appSecret: "bot-secret-value", domain: "feishu", ownerOpenId: "ou_owner" };
+
+test("a product-provided app: owner-private metadata, device authorization, expiry with reason and re-authorization", async (t) => {
+  const f = await handover(t);
+  const [listed] = await f.service.connections(signal());
+  assert.equal(listed.usage, "owner_private", "products learn that these tools act as the owner");
+  assert.equal(listed.account.status, "feishu_configuration_required");
+  assert.equal(listed.account.reason, "application_not_provided");
+
+  assert.equal((await f.account("configure", { ...application, appSecret: "" })).status, "feishu_application_invalid");
+  assert.equal((await f.account("configure", { ...application, extra: 1 })).status, "feishu_application_invalid");
+  assert.equal(existsSync(join(f.directory, "credentials.json")), false);
+
+  const installed = await f.account("configure", application);
+  assert.equal(installed.status, "authorization_required");
+  assert.equal(installed.applicationChanged, true);
+  assert.ok(!JSON.stringify(installed).includes("bot-secret-value"), "the secret is accepted, never returned");
+  assert.equal(readFileSync(join(f.directory, "app-secret"), "utf8"), "bot-secret-value");
+  assert.equal(statSync(join(f.directory, "app-secret")).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.directory, "credentials.json"), "utf8")),
+    { version: 1, appId: "cli_app", appSecretFile: "app-secret", domain: "feishu", ownerOpenId: "ou_owner" });
+
+  const begun = await f.account("connect");
+  assert.equal(begun.authorizationUrl, "https://open.feishu.cn/consent");
+  const waiting = await f.account("complete");
+  assert.equal(waiting.status, "authorization_pending", "not confirmed yet");
+  assert.equal(waiting.authorizationUrl, "https://open.feishu.cn/consent");
+  f.cli.auth.consent = true;
+  const done = await f.account("complete");
+  assert.equal(done.status, "connected");
+  assert.equal(done.userName, "Alice");
+  assert.equal((await f.call("cli_read", ["mail", "+triage"])).status, "completed");
+
+  // The refresh token lapses (the CLI refreshes access tokens itself until then).
+  f.cli.auth.user = "expired"; f.cli.auth.consent = false;
+  const expired = await f.account("status");
+  assert.equal(expired.status, "expired");
+  assert.equal(expired.reason, "refresh_token_expired");
+  const refused = await f.call("cli_read", ["mail", "+triage"]);
+  assert.equal(refused.status, "failed");
+  assert.equal(refused.error, "feishu_personal_authorization_required");
+  assert.equal(refused.detail.state, "expired");
+  assert.equal(refused.detail.reason, "refresh_token_expired");
+  assert.equal(refused.detail.action, "reauthorize");
+  assert.match(refused.detail.message, /重新授权/);
+  assert.equal(refused.detail.authorizationUrl, "https://open.feishu.cn/consent");
+  assert.equal((await f.service.tools({ ...alice, connections: ["owner-feishu"] })).filter((tool) => tool.name.startsWith("owner_feishu__")).length, 2,
+    "tools stay listed while authorization is missing");
+  const reauthorizing = await f.account("status");
+  assert.equal(reauthorizing.status, "authorization_pending", "the tool result started the re-authorization");
+  f.cli.auth.consent = true;
+  assert.equal((await f.account("complete")).status, "connected");
+});
+
+test("handing over the same app keeps the owner's authorization; another app or owner resets it", async (t) => {
+  const f = await handover(t);
+  await f.account("configure", application);
+  f.cli.auth.user = "valid";
+  assert.equal((await f.account("status")).status, "connected");
+  const again = await f.account("configure", { ...application, appSecret: "rotated-secret" });
+  assert.equal(again.applicationChanged, false);
+  assert.equal(again.status, "connected");
+  assert.equal(readFileSync(join(f.directory, "app-secret"), "utf8"), "rotated-secret");
+  mkdirSync(join(f.directory, "cli-data"), { recursive: true });
+  writeFileSync(join(f.directory, "cli-data", "token"), "old-user-token");
+  f.cli.auth.user = "missing";
+  const other = await f.account("configure", { ...application, appId: "cli_other" });
+  assert.equal(other.applicationChanged, true);
+  assert.equal(other.status, "authorization_required", "a new app is never reported as an expired old one");
+  assert.equal(existsSync(join(f.directory, "cli-data", "token")), false, "the previous identity's tokens are removed");
+  assert.equal(JSON.parse(readFileSync(join(f.directory, "lark-cli", "config.json"), "utf8")).apps[0].appId, "cli_other");
+});
+
+test("hand-over and completion over HTTP require the service token", async (t) => {
+  const s = await setup(); t.after(s.cleanup);
+  const cli = fakeCli({ authorized: false });
+  const file = (name, value, mode) => writeFileSync(join(s.directory, name), value, mode ? { mode } : undefined);
+  file("sealing.key", Buffer.from(s.sealingKey).toString("base64"), 0o600);
+  file("caller.jwks.json", JSON.stringify(s.trust.callerKeys));
+  file("authority.jwks.json", JSON.stringify(s.trust.authorityKeys));
+  file("config.json", JSON.stringify({ listen: { host: "127.0.0.1", port: 0 }, stateDirectory: "http-state",
+    encryption: { provider: "development-file", keyFile: "sealing.key" },
+    trust: { issuer: s.trust.issuer, audience: s.trust.audience, callerKeys: "caller.jwks.json", authorityKeys: "authority.jwks.json" },
+    connections: [{ id: "owner-feishu", kind: "feishu", owner: "@alice", settings: { directory: "feishu/alice" } }] }));
+  const started = await start(loadConfig(join(s.directory, "config.json")),
+    [feishuConnector({ runner: cli.runner, baseDirectory: s.directory, classifierDirectory: join(s.directory, "classifier") })]);
+  t.after(() => started.close());
+  const post = async (path, body, token) => fetch(`${started.url}/v1/connections/owner-feishu/${path}`, { method: "POST",
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) });
+  assert.equal((await post("application", application)).status, 401);
+  assert.equal((await post("application", application, await s.callerToken())).status, 401, "an Agent's caller token cannot hand over apps");
+  assert.equal(existsSync(join(s.directory, "feishu", "alice", "credentials.json")), false);
+  const token = await s.serviceToken();
+  assert.equal((await (await post("application", application, token)).json()).status, "authorization_required");
+  assert.equal((await (await post("connect", {}, token)).json()).authorizationUrl, "https://open.feishu.cn/consent");
+  cli.auth.consent = true;
+  assert.equal((await (await post("complete", {}, token)).json()).status, "connected");
+  const listed = await (await fetch(`${started.url}/v1/connections`, { headers: { Authorization: `Bearer ${token}` } })).json();
+  assert.equal(listed.connections[0].usage, "owner_private");
 });

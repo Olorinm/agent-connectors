@@ -35,6 +35,9 @@ These guidance commands never touch the owner's data.
   they decide. If it is declined, tell the owner and do not retry another way.
 - Not available: local file paths (`@file`, `-`, absolute or `~` paths), `+watch` and `+subscribe`.
   Files the CLI produces are returned as attachments.
-- If the owner's authorization lacks a permission, the command reports
-  `feishu_personal_authorization_required` with an official link; pass it to the owner.
+- If the owner's authorization is missing, expired or lacks a permission, the command reports
+  `feishu_personal_authorization_required` with `state` (`authorization_required`, `expired`, `scope_required`),
+  a message and an official link. Tell the owner it needs re-authorization (需要重新授权) and pass the link,
+  or ask them to use 飞书 → 重新授权 in Mau. Never ask for tokens in chat.
+- These tools act as the owner, so Mau offers them only in the owner's private conversation with you.
 - Output over 500,000 characters is cut; use the CLI's paging and filter flags.
