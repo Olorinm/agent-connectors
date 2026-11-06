@@ -4,7 +4,7 @@ Notable changes to Agent Connectors, newest first. Each version has a GitHub Rel
 notes and the package archive. When releasing, add the new section here in the version-bump commit;
 the Release notes are copied from it.
 
-## [Unreleased]
+## [0.1.0-alpha.9] - 2026-11-06
 
 - Feishu owner tools on a product-provided app (the same app a chat channel's bot uses).
   - `POST /v1/connections/:id/application` installs `appId`, app secret, domain and owner `open_id`; the secret is
