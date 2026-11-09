@@ -347,3 +347,38 @@ test("hand-over and completion over HTTP require the service token", async (t) =
   const listed = await (await fetch(`${started.url}/v1/connections`, { headers: { Authorization: `Bearer ${token}` } })).json();
   assert.equal(listed.connections[0].usage, "owner_private");
 });
+
+test("Feishu policy: lark-cli domains are grouped, each group's reads and writes are set separately", async (t) => {
+  const f = await feishu(t);
+  const view = await f.service.policy("work-feishu", signal());
+  assert.deepEqual(view.groups.map((g) => [g.id, g.labelZh, g.operations.map((o) => `${o.id}:${o.setting}`)]), [
+    ["docs", "文档、知识库和云空间", ["feishu.docs.read:allow", "feishu.docs.write:ask"]],
+    ["calendar", "日历和会议", ["feishu.calendar.read:allow", "feishu.calendar.write:ask"]],
+    ["im", "消息和邮件", ["feishu.im.read:allow", "feishu.im.write:ask"]],
+    ["other", "其他", ["feishu.other.read:allow", "feishu.other.write:ask"]],
+  ]);
+  await f.service.setPolicy("work-feishu", { settings: { "feishu.im.read": "deny", "feishu.im.write": "allow" } }, signal());
+  const denied = await f.call("cli_read", ["mail", "+triage"]);
+  assert.deepEqual([denied.error, denied.detail.operation], ["connector_operation_denied", "feishu.im.read"]);
+  assert.equal((await f.call("cli_read", ["drive", "+download", "--file-token", "x"])).status, "completed");
+  assert.equal((await f.call("cli_read", ["skills", "read", "lark-mail"])).status, "completed", "guidance is outside the policy");
+  // Sending allowed: runs at once; writes in other groups still ask.
+  assert.equal((await f.call("cli_write", ["mail", "+send", "--to", "a@example.test"])).status, "completed");
+  assert.equal((await f.call("cli_write", ["docs", "+create", "--title", "x"])).status, "approval_required");
+  assert.equal(f.cli.executed().filter((c) => c.args[0] === "mail" && c.args.includes("+triage")).length, 0);
+  // The authorized user's name is reported for the owner's account page.
+  assert.equal((await f.service.account("work-feishu", "status", signal())).accountName, "Alice");
+});
+
+test("Feishu policy: a write sent to the read tool points to cli_write unless that write is denied", async (t) => {
+  const f = await feishu(t);
+  await f.service.setPolicy("work-feishu", { settings: { "feishu.im.read": "deny", "feishu.im.write": "allow" } }, signal());
+  // Reading mail is denied, sending is allowed: the sandbox relay retries a send on the write tool.
+  assert.equal((await f.call("cli_read", ["mail", "+send", "--to", "a@example.test"])).error, "feishu_command_requires_write_tool");
+  assert.equal((await f.call("cli_write", ["mail", "+send", "--to", "a@example.test"])).status, "completed");
+  await f.service.setPolicy("work-feishu", { settings: { "feishu.im.write": "deny" } }, signal());
+  assert.equal((await f.call("cli_read", ["mail", "+send", "--to", "a@example.test"])).error, "connector_operation_denied");
+  // The CLI is asked for a command's risk once per argument list.
+  const helps = f.cli.calls.filter((c) => c.args.includes("--help=true") && c.args.includes("+send")).length;
+  assert.equal(helps, 1);
+});

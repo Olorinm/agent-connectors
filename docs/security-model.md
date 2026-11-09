@@ -30,6 +30,9 @@ explicitly, so a caller token is never accepted as a grant or service token, and
 
 ## Writes
 
+These steps apply to every call that needs the owner: writes by default, and any operation (reads included)
+the owner set to `ask` (see [Operation policy](#operation-policy)).
+
 1. The Agent calls a write tool. Arguments are validated once and canonicalized; that canonical JSON is what
    is stored, shown, approved and executed (it is never re-parsed). Tool schemas must convert to JSON Schema.
 2. The service stores a pending operation and its digest:
@@ -50,6 +53,37 @@ Pre-approval (`autoApprove`) applies only to write tools that declare `targets` 
 a write lands — and each rule must pin all of them to exact values. Keep it to destinations the owner controls,
 such as one table. Pre-approved writes are recorded like any other operation; if an identical one ended
 `uncertain`, the next one goes to the owner instead of running.
+
+## Operation policy
+
+Each connector declares an operation catalog per connection (`Connector.operations`): groups, and operations with
+`read`, `write` or `destructive` risk, upstream scopes and, where it exists, the narrowest scope to add. Connectors
+without a catalog get two operations, `read` and `write`, matching tool risk. Every tool names the operations it
+can perform; passthrough tools (gws, lark-cli, agent-browser) resolve the exact operation of each call before
+anything runs: the Discovery method for gws, the domain for lark-cli, the command for agent-browser. Help,
+schemas and dry runs are outside the policy.
+
+The owner's settings are stored per connection in the service database (`policies`), only where they differ
+from the defaults (reads `allow`, everything else `ask`), and survive disconnect and reconnect; reset removes
+them. They are managed with the service token only (`GET|PUT /v1/connections/:id/policy`,
+`POST /v1/connections/:id/policy/reset`); an Agent's caller token cannot read or change them.
+
+| Setting | Owner caller | Read-only caller |
+| --- | --- | --- |
+| `allow` | runs directly; a write is still recorded as an operation, and one whose identical predecessor ended `uncertain` goes to the owner | reads run; writes are never offered |
+| `ask` | `approval_required`, also for reads; the grant flow above | refused with `connector_operation_requires_approval` (nobody can approve there) |
+| `deny` | not listed, refused with `connector_operation_denied` | same |
+
+A tool is listed while at least one of its operations is usable by the caller; descriptions say which operations
+ask or are denied, but tool names and input schemas never change with the policy. Settings apply from the next
+call. An approval is checked again: an operation denied after its request was shown is refused and marked `denied`.
+A write named through a read tool is still refused by that tool (pointing to the write tool) unless it is denied.
+
+An operation whose scopes the authorization lacks is reported `available: false, unavailableReason:
+"scope_required"`; it is `grantable` where the connector supports incremental consent (`account.scopes`). Then
+`POST /v1/connections/:id/connect` accepts `{ "scopes": [...] }`, limited to the catalog's grant scopes; Google
+requests them with `include_granted_scopes`, and the current authorization keeps working until the new consent
+completes. Operations a connector lists but does not offer are `not_supported` and cannot be set.
 
 ## At rest
 

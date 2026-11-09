@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { OAuth2Client, CodeChallengeMethod, type Credentials } from "google-auth-library";
 // Match google-auth-library's CommonJS Gaxios instance and nominal private-field types.
 import gaxios = require("gaxios");
+import { gmail as gmailClient } from "@googleapis/gmail";
 import { z } from "zod";
 import { digest, type Json } from "../../canonical.js";
 import { ConnectorError, type ToolContext } from "../../connector.js";
@@ -38,7 +39,9 @@ interface AccountState {
   binding: string;
   generation: string;
   tokens?: Credentials;
-  pending?: { state: string; verifier: string; expiresAt: number; consumed?: boolean };
+  /** The authorized mailbox address (Gmail profile), shown to its owner. */
+  email?: string;
+  pending?: { state: string; verifier: string; expiresAt: number; consumed?: boolean; authorizationUrl?: string; scopes?: string[] };
 }
 
 /** Used only under the connector's per-account lock. Google SDK owns the OAuth protocol. */
@@ -106,25 +109,42 @@ export class GoogleAccount {
   localStatus(): Json {
     try {
       this.oauthClient();
-      return { status: this.state.tokens ? "authorized_unverified" :
-        this.state.pending && !this.state.pending.consumed && this.state.pending.expiresAt > Date.now() ? "authorization_pending" : "authorization_required",
-      backend: "google-api", product: this.settings.product };
+      const pending = this.state.pending && !this.state.pending.consumed && this.state.pending.expiresAt > Date.now() ? this.state.pending : undefined;
+      if (this.state.tokens) return { status: "authorized_unverified", backend: "google-api", product: this.settings.product };
+      // The consent link stays available while it is valid, so a reloaded page can show it again.
+      return pending ? { status: "authorization_pending", backend: "google-api", product: this.settings.product,
+        ...(pending.authorizationUrl ? { authorizationUrl: pending.authorizationUrl } : {}), expiresAt: new Date(pending.expiresAt).toISOString() }
+        : { status: "authorization_required", backend: "google-api", product: this.settings.product };
     } catch (error) {
       return { status: error instanceof ConnectorError ? error.code : "configuration_invalid", backend: "google-api", product: this.settings.product };
     }
   }
-  async begin(): Promise<Json> {
+  /** Scopes the current authorization holds; before authorization, those a connect would request. */
+  grantedScopes(): string[] {
+    const granted = this.state.tokens?.scope?.split(/\s+/).filter(Boolean);
+    return granted?.length ? granted : this.scopes;
+  }
+  /**
+   * Starts consent. With `added`, the configured scopes plus those already granted and the added ones are requested
+   * (incremental consent); the existing authorization keeps working until the new one completes.
+   */
+  async begin(added: string[] = []): Promise<Json> {
     const client = this.oauthClient();
     const pkce = await client.generateCodeVerifierAsync();
     const state = randomBytes(32).toString("base64url");
+    const incremental = added.length > 0 && !!this.state.tokens;
+    const requested = [...new Set([...this.scopes, ...(incremental ? this.grantedScopes() : []), ...added])];
     this.state.generation = randomUUID();
-    delete this.state.tokens;
-    this.state.pending = { state, verifier: pkce.codeVerifier, expiresAt: Date.now() + 600_000 };
-    await this.save();
-    return { status: "authorization_required", authorizationUrl: client.generateAuthUrl({
-      access_type: "offline", prompt: "consent", scope: this.scopes, state,
+    if (!incremental) { delete this.state.tokens; delete this.state.email; }
+    const expiresAt = Date.now() + 600_000;
+    const authorizationUrl = client.generateAuthUrl({
+      access_type: "offline", prompt: "consent", scope: requested, state,
+      ...(incremental ? { include_granted_scopes: true, ...(this.state.email ? { login_hint: this.state.email } : {}) } : {}),
       code_challenge: pkce.codeChallenge, code_challenge_method: CodeChallengeMethod.S256,
-    }), expiresAt: new Date(this.state.pending.expiresAt).toISOString() };
+    });
+    this.state.pending = { state, verifier: pkce.codeVerifier, expiresAt, authorizationUrl, scopes: requested };
+    await this.save();
+    return { status: "authorization_required", authorizationUrl, expiresAt: new Date(expiresAt).toISOString() };
   }
   async complete(state: string, code?: string): Promise<boolean> {
     const pending = this.state.pending;
@@ -134,7 +154,10 @@ export class GoogleAccount {
       if (code) {
         const { tokens } = await this.oauthClient().getToken({ code, codeVerifier: pending.verifier });
         if (!tokens.access_token) throw new ConnectorError("oauth_token_missing");
-        this.state.tokens = tokens;
+        // A new authorization may belong to another account: approvals and the cached address do not carry over.
+        this.state.tokens = { ...tokens, ...(tokens.scope ? {} : pending.scopes ? { scope: pending.scopes.join(" ") } : {}) };
+        this.state.generation = randomUUID();
+        delete this.state.email;
       }
       return true;
     } catch { throw new ConnectorError("oauth_authorization_failed"); }
@@ -166,13 +189,29 @@ export class GoogleAccount {
     if (local.status !== "authorized_unverified") return local;
     try {
       const info = await this.oauthClient().getTokenInfo(await this.accessToken());
-      return { ...local, status: "connected", verification: "oauth", apiAccess: "checked_on_use", scopes: info.scopes };
+      return { ...local, status: "connected", verification: "oauth", apiAccess: "checked_on_use", scopes: info.scopes,
+        ...(await this.accountEmail(info.email) ? { accountEmail: this.state.email! } : {}) };
     } catch (error) {
       return { ...local, status: error instanceof ConnectorError ? error.code : "google_authorization_check_failed" };
     }
   }
+  /** Gmail's profile names the authorized address; it is read once per authorization and kept with it. */
+  private async accountEmail(fromToken?: string): Promise<boolean> {
+    if (this.state.email) return true;
+    let email = fromToken;
+    if (!email && this.settings.product === "gmail") {
+      try {
+        const profile = await gmailClient({ version: "v1", auth: await this.businessClient() }).users.getProfile({ userId: "me" },
+          { signal: this.context.signal, retry: false, timeout: 30_000, maxRedirects: 0 });
+        email = profile.data.emailAddress ?? undefined;
+      } catch { return false; }
+    }
+    if (!email || !z.email().max(254).safeParse(email).success) return false;
+    this.state.email = email; await this.save();
+    return true;
+  }
   async disconnect(): Promise<Json> {
-    delete this.state.tokens; delete this.state.pending; this.state.generation = randomUUID(); await this.save();
+    delete this.state.tokens; delete this.state.pending; delete this.state.email; this.state.generation = randomUUID(); await this.save();
     return { status: "disconnected", providerRevocation: "Remove this application's access in your Google Account to revoke upstream consent." };
   }
   /** The business client has no refresh token, so the SDK cannot replay a write after a 401/403. */

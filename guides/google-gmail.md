@@ -18,9 +18,12 @@ Mau runs the command for you with the owner's authorization; you never handle Go
   `GOOGLE_*` variables — authentication is managed by Mau and those commands are refused.
 - **Reads run immediately**: GET methods, `+triage`, `+read`, `--dry-run`, `gws gmail --help`,
   `gws schema gmail.<resource>.<method>`.
-- **Writes wait for the owner**: sending, drafting, replying, forwarding, modifying labels,
-  trashing. The owner sees the exact command on an approval card. The command blocks until they
+- **Writes wait for the owner** unless they allowed them: sending, drafting, replying, forwarding,
+  modifying labels, trashing. The owner sees the exact command on an approval card. The command blocks until they
   decide; keep waiting for its output. If it is declined, tell the owner and do not retry another way.
+- The owner can set each operation to run directly, to ask every time, or to not allowed. A refused one
+  fails with `connector_operation_denied`; do not work around it, tell the owner if you need it. In scheduled
+  or delegated work, operations that ask fail with `connector_operation_requires_approval`.
 - If the owner's consent does not include an operation, the command fails with
   `google_scope_not_granted` before any card is shown. Tell the owner which permission is missing
   (the error lists it) — they can grant it in Mau's connector page.

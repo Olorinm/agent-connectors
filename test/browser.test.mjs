@@ -327,3 +327,34 @@ test("parseCommand keeps agent-browser syntax and marks file outputs", () => {
   assert.throws(() => parseCommand(["fill", "@e1", "--x"]), { code: "agent_browser_flag_not_allowed" });
   assert.throws(() => parseCommand(["upload", "@e1", "a.pdf", "x/a.pdf"]), { code: "agent_browser_upload_duplicate_file" });
 });
+
+test("browser policy: commands map to navigate, read, interact, download and upload; upload allowed runs without approval", async (t) => {
+  const s = setup(); t.after(s.cleanup);
+  const signal = new AbortController().signal;
+  const view = await s.service.policy("web", signal);
+  assert.deepEqual(view.groups.map((g) => [g.id, g.operations.map((o) => `${o.id}:${o.risk}:${o.setting}`)]), [
+    ["browse", ["browser.navigate:read:allow", "browser.read:read:allow", "browser.interact:read:allow"]],
+    ["files", ["browser.download:read:allow", "browser.upload:write:ask"]],
+  ]);
+  await s.service.setPolicy("web", { settings: { "browser.interact": "deny", "browser.upload": "allow" } }, signal);
+  assert.equal((await ab(s.service, "open", "https://upload.example.com/form")).status, "completed");
+  assert.equal((await ab(s.service, "snapshot", "-i")).status, "completed");
+  for (const args of [["click", "@e1"], ["fill", "@e1", "x"], ["find", "role", "button", "click"]]) {
+    const refused = await ab(s.service, ...args);
+    assert.deepEqual([refused.error, refused.detail.operation], ["connector_operation_denied", "browser.interact"], args.join(" "));
+  }
+  assert.equal((await call(s.service, "handoff_start", { instructions: "Sign in" })).error, "connector_operation_denied");
+  assert.ok(!s.service.tools(alice).some((tool) => tool.name.startsWith("web__handoff_")), "handoff tools are hidden with interaction denied");
+  assert.equal((await ab(s.service, "skills", "get", "core")).status, "completed", "guidance is outside the policy");
+  assert.ok(!commands(s).some((line) => line.startsWith("click") || line.startsWith("fill")), "nothing denied ran");
+  // Upload set to allow: the exact files go to the current site without a card; read-only callers still never upload.
+  const input = { args: ["upload", "@e3", "cv.pdf"], site: "https://upload.example.com", files: [{ name: "cv.pdf", mediaType: "application/pdf", contentBase64: "YWJj" }] };
+  const done = await call(s.service, "agent_browser_write", input);
+  assert.equal(done.status, "completed"); assert.equal(s.browser.uploads.length, 2);
+  assert.deepEqual(await call(s.service, "agent_browser_write", input, { ...alice, readOnly: true }), { status: "failed", error: "tool_not_available" });
+  // Upload denied: also refused on the read tool, so the sandbox CLI does not retry on the write tool.
+  await s.service.setPolicy("web", { settings: { "browser.upload": "deny", "browser.download": "deny" } }, signal);
+  assert.equal((await ab(s.service, "upload", "@e3", "cv.pdf")).error, "connector_operation_denied");
+  assert.equal((await ab(s.service, "download", "@e1", "a.pdf")).detail.operation, "browser.download");
+  assert.ok(!s.service.tools(alice).some((tool) => tool.name === "web__agent_browser_write"));
+});

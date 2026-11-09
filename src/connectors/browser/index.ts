@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Json } from "../../canonical.js";
-import { ConnectorError, type ConnectionConfig, type Connector, type ToolContext, type ToolDefinition } from "../../connector.js";
+import { ConnectorError, type ConnectionConfig, type Connector, type OperationCatalog, type ToolContext, type ToolDefinition } from "../../connector.js";
 import { connectGuard, type BrowserGuard, type GuardFactory } from "./cdp.js";
-import { parseCommand, shellLine, type Command } from "./command.js";
+import { commandOperation, parseCommand, shellLine, type Command } from "./command.js";
 import { CloudflareBrowserRun, agentBrowserBinary, cdpEndpoint, runAgentBrowser, type AgentBrowserRunner, type BrowserRun, type BrowserRunAccount, type CliResult } from "./runtime.js";
 
 export { CloudflareBrowserRun, agentBrowserBinary, runAgentBrowser, type AgentBrowserRunner, type BrowserRun, type CliResult } from "./runtime.js";
@@ -35,6 +35,18 @@ const file = z.object({ name: z.string().min(1).max(120).regex(/^[^/\\\u0000-\u0
   contentBase64: z.string().min(1).max(MAX_UPLOAD_BASE64).regex(/^[A-Za-z0-9+/]+={0,2}$/) }).strict();
 const writeInput = z.object({ args, site, files: z.array(file).min(1).max(10) }).strict();
 type WriteInput = z.infer<typeof writeInput>;
+
+/** Owner-adjustable operations. Following the product rule, everything but upload is a read and allowed by default. */
+const browserCatalog: OperationCatalog = {
+  groups: [{ id: "browse", label: "Browsing", labelZh: "浏览网页" }, { id: "files", label: "Files", labelZh: "文件" }],
+  operations: [
+    { id: "browser.navigate", group: "browse", label: "Open pages and switch tabs", labelZh: "打开网页和切换标签页", risk: "read" },
+    { id: "browser.read", group: "browse", label: "Read pages, take screenshots and PDFs", labelZh: "读取网页、截图和导出 PDF", risk: "read" },
+    { id: "browser.interact", group: "browse", label: "Click, type, fill forms and hand over to the owner", labelZh: "点击、输入、填写表单和请你接管", risk: "read" },
+    { id: "browser.download", group: "files", label: "Download files", labelZh: "下载文件", risk: "read" },
+    { id: "browser.upload", group: "files", label: "Upload files to sites", labelZh: "向网站上传文件", risk: "write" },
+  ],
+};
 
 export interface BrowserOptions {
   baseDirectory?: string;
@@ -250,6 +262,8 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
 
   const read: ToolDefinition<{ args: string[] }> = {
     name: "agent_browser_read", risk: "read", input: z.object({ args }).strict(),
+    operations: ["browser.navigate", "browser.read", "browser.interact", "browser.download"],
+    operation: (_context, value) => commandOperation(parseCommand(value.args)),
     description: "Run an official agent-browser command (vercel-labs/agent-browser) in the owner's remote browser. Pass argument strings without " +
       "the executable or shell syntax, e.g. [\"open\",\"https://example.com\"], [\"snapshot\",\"-i\"], [\"click\",\"@e2\"], [\"fill\",\"@e3\",\"text\"]. " +
       "Navigation, reading, clicks and typing run directly. screenshot, pdf and download return files. Commands that read or change cookies, " +
@@ -269,7 +283,7 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
     },
   };
   const write: ToolDefinition<WriteInput> = {
-    name: "agent_browser_write", risk: "write", input: writeInput, targets: ["site"],
+    name: "agent_browser_write", risk: "write", input: writeInput, targets: ["site"], operations: ["browser.upload"],
     description: "Send workspace files to a site with agent-browser's upload command, e.g. args [\"upload\",\"@e3\",\"cv.pdf\"]. The owner approves " +
       "the exact files and site first. site must equal the current page's origin; each file named in args is supplied in files.",
     summarize: (value) => `上传 ${value.files.map((f) => `${f.name}（${Math.ceil(f.contentBase64.length * 0.75 / 1024)} KB）`).join("、")}到 ${new URL(value.site).host}\n${shellLine(value.args)}`,
@@ -284,7 +298,7 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
   };
 
   const tools: ToolDefinition[] = [read, write,
-    { name: "handoff_start", risk: "read",
+    { name: "handoff_start", risk: "read", operations: ["browser.interact"],
       description: "Ask the owner to take over the browser (login, CAPTCHA, a choice only they can make). The owner gets a Live View of the current tab " +
         "with your instructions and Done/Failed buttons; the URL is for the owner only, never repeat it to anyone else. Poll handoff_status until done, " +
         "then take a new snapshot: the page may have changed.",
@@ -300,7 +314,7 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
         await save(context, { ...(await load(context)), handoff });
         return { handoffId, liveViewUrl, expiresAt: handoff.expiresAt, instructions: value.instructions };
       }) },
-    { name: "handoff_status", risk: "read",
+    { name: "handoff_status", risk: "read", operations: ["browser.interact"],
       description: "Check a handoff: done becomes true when the owner presses Done or Failed (success says which, when known), the time runs out or the tab is gone.",
       input: z.object({ handoffId: z.string().max(100) }).strict(),
       execute: (context, value: { handoffId: string }) => locked(context, async (run) => {
@@ -315,7 +329,7 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
         return { handoffId: value.handoffId, active, done: !active, ...(state.success !== undefined ? { success: state.success } : {}),
           ...(state.reason ? { reason: state.reason } : expired ? { reason: "expired" } : !exists ? { reason: "tab_closed" } : {}), url: await currentUrl(run) };
       }) },
-    { name: "handoff_cancel", risk: "read",
+    { name: "handoff_cancel", risk: "read", operations: ["browser.interact"],
       description: "End the current handoff: the owner's live view stops controlling the browser (its tab is replaced by a blank one).",
       input: z.object({ handoffId: z.string().max(100) }).strict(),
       execute: (context, value: { handoffId: string }) => locked(context, async (run) => {
@@ -341,7 +355,7 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
     return active.targetId;
   };
 
-  return { kind: "browser", tools, account: {
+  return { kind: "browser", tools, operations: () => browserCatalog, account: {
     async status({ connection, credentials }) {
       try { account(connection); } catch (error) { return { status: error instanceof ConnectorError ? error.code : "browser_settings_invalid" } as Json; }
       const saved = state.safeParse((await credentials.get()) ?? { version: 1 });

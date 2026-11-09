@@ -340,6 +340,7 @@ function fakeGws() {
     "gmail.users.messages.get": ["GET", ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"]],
     "gmail.users.messages.send": ["POST", ["https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"]],
     "gmail.users.drafts.create": ["POST", ["https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/gmail.modify"]],
+    "gmail.users.messages.trash": ["POST", ["https://www.googleapis.com/auth/gmail.modify"]],
   };
   const runner = async (args, env) => {
     runs.push({ args, token: env.GOOGLE_WORKSPACE_CLI_TOKEN, home: env.HOME });
@@ -414,4 +415,107 @@ test("without a gws binary the Google tools are unchanged", async (t) => {
   const s = await fixture(t); await s.authorize();
   const names = (await s.connector.discover({ connection: s.connection, credentials: s.credentials, signal: signal() })).map((tool) => tool.name);
   assert.ok(!names.includes("gws_read") && names.includes("get_thread"));
+});
+
+const GMAIL = (name) => name === "mail" ? "https://mail.google.com/" : `https://www.googleapis.com/auth/gmail.${name}`;
+const operations = (view) => Object.fromEntries([...view.groups.flatMap((group) => group.operations), ...(view.background ?? [])].map((o) => [o.id, o]));
+
+test("Gmail policy: grouped operations, scope availability, unsupported entries and the authorized address", async (t) => {
+  const s = await fixture(t, "gmail", { settings: { scopes: [GMAIL("readonly")] } });
+  // Before authorization the configured scopes decide; the pending consent link is reported for a reload.
+  const begin = await s.service.account("google", "connect", signal());
+  const pending = await s.service.account("google", "status", signal());
+  assert.equal(pending.status, "authorization_pending");
+  assert.equal(pending.authorizationUrl, begin.authorizationUrl); assert.equal(pending.expiresAt, begin.expiresAt);
+  await s.authorize();
+  const view = await s.service.policy("google", signal());
+  assert.deepEqual(view.groups.map((group) => [group.id, group.labelZh]), [["read", "读取权限"], ["write", "写入和删除权限"]]);
+  const byId = operations(view);
+  assert.deepEqual(view.groups[0].operations.map((o) => o.id), ["gmail.messages.read", "gmail.drafts.read", "gmail.labels.read"]);
+  for (const o of view.groups[0].operations) assert.deepEqual([o.setting, o.default, o.available], ["allow", "allow", true]);
+  assert.deepEqual(byId["gmail.send"], { id: "gmail.send", label: "Send email", labelZh: "发送邮件", risk: "write", setting: "ask", default: "ask",
+    available: false, unavailableReason: "scope_required", grantable: true, grantScope: GMAIL("send") });
+  assert.equal(byId["gmail.messages.trash"].risk, "destructive");
+  assert.equal(byId["gmail.messages.delete"].grantScope, "https://mail.google.com/");
+  assert.deepEqual([byId["gmail.unsubscribe"].available, byId["gmail.unsubscribe"].unavailableReason], [false, "not_supported"]);
+  assert.deepEqual(view.background.map((o) => [o.id, o.unavailableReason]), [["gmail.background.sync", "not_supported"]]);
+  await assert.rejects(s.service.setPolicy("google", { settings: { "gmail.unsubscribe": "allow" } }, signal()), { code: "policy_operation_not_supported" });
+  // Scope-limited operations can be set ahead of a grant.
+  assert.equal(operations(await s.service.setPolicy("google", { settings: { "gmail.send": "allow" } }, signal()))["gmail.send"].setting, "allow");
+
+  // The address comes from the Gmail profile once and is kept with the authorization.
+  s.remote.route = (url) => url.pathname === "/gmail/v1/users/me/profile" ? { emailAddress: "owner@example.test", messagesTotal: 1 } : undefined;
+  assert.equal((await s.service.account("google", "status", signal())).accountEmail, "owner@example.test");
+  const profileCalls = () => s.remote.apiCalls.filter((call) => call.url.endsWith("/users/me/profile")).length;
+  assert.equal(profileCalls(), 1);
+  assert.equal((await s.service.account("google", "status", signal())).accountEmail, "owner@example.test");
+  assert.equal(profileCalls(), 1);
+  await s.service.account("google", "disconnect", signal());
+  assert.equal((await s.service.account("google", "status", signal())).accountEmail, undefined);
+  // Disconnecting keeps the owner's settings.
+  assert.equal(operations(await s.service.policy("google", signal()))["gmail.send"].setting, "allow");
+});
+
+test("Gmail incremental consent adds an allow-listed scope and keeps the current authorization until it completes", async (t) => {
+  const s = await fixture(t, "gmail", { settings: { scopes: [GMAIL("readonly")] } });
+  await s.authorize();
+  for (const scopes of [["https://www.googleapis.com/auth/drive"], [GMAIL("send"), "openid"], []])
+    await assert.rejects(s.service.account("google", "connect", signal(), { scopes }), (error) => ["connect_scope_not_allowed", "connect_input_invalid"].includes(error.code));
+  const begin = await s.service.account("google", "connect", signal(), { scopes: [GMAIL("send")] });
+  const url = new URL(begin.authorizationUrl);
+  assert.deepEqual(url.searchParams.get("scope").split(" "), [GMAIL("readonly"), GMAIL("send")]);
+  assert.equal(url.searchParams.get("include_granted_scopes"), "true");
+  // Reads keep working while the owner decides.
+  assert.equal((await s.service.account("google", "status", signal())).status, "connected");
+  assert.equal((await s.call("search_threads", {})).status, "completed");
+  assert.equal(operations(await s.service.policy("google", signal()))["gmail.send"].available, false);
+  s.remote.scopes = url.searchParams.get("scope");
+  await s.service.oauthCallback(url.searchParams.get("state"), "valid-code", signal());
+  const after = operations(await s.service.policy("google", signal()));
+  assert.equal(after["gmail.send"].available, true); assert.equal(after["gmail.send"].grantable, undefined);
+  assert.equal(after["gmail.messages.modify"].available, false);
+});
+
+test("Gmail policy is enforced on the typed tools and on each gws method", async (t) => {
+  const gws = fakeGws();
+  const s = await fixture(t, "gmail", { options: { gwsRunner: gws.runner } });
+  await s.authorize();
+  const set = (settings) => s.service.setPolicy("google", { settings }, signal());
+  const visible = () => s.service.tools(s.caller).map((tool) => tool.name);
+  await s.service.prepare(s.caller, signal());
+  const before = s.service.tools(s.caller);
+  const send = ["gmail", "+send", "--to", "reader@example.test", "--subject", "s", "--body", "hello"];
+
+  // Reading messages denied: their tools disappear; gws_read stays for drafts and labels but refuses message reads.
+  await set({ "gmail.messages.read": "deny" });
+  assert.ok(!visible().includes("google__search_threads") && !visible().includes("google__get_thread") && visible().includes("google__list_drafts"));
+  assert.match(s.service.tools(s.caller).find((tool) => tool.name === "google__gws_read").description, /does not allow: Search and read messages/);
+  assert.equal((await s.call("search_threads", {})).error, "connector_operation_denied");
+  const triage = await s.call("gws_read", { args: ["gmail", "+triage"] });
+  assert.equal(triage.error, "connector_operation_denied"); assert.equal(triage.detail.operation, "gmail.messages.read");
+  assert.equal((await s.call("gws_read", { args: ["gmail", "--help"] })).status, "completed", "help is outside the policy");
+  assert.ok(!gws.runs.some((run) => run.token));
+  await set({ "gmail.messages.read": "allow" });
+
+  // Sending allowed: runs without an approval card; drafts still ask.
+  await set({ "gmail.send": "allow" });
+  const sent = await s.call("gws_write", { args: send });
+  assert.equal(sent.status, "completed"); assert.equal(gws.runs.at(-1).token, "private-access");
+  assert.equal((await s.call("gws_write", { args: [...send, "--draft"] })).status, "approval_required");
+  assert.equal((await s.call("create_draft", { to: ["reader@example.test"] })).status, "approval_required");
+
+  // Drafts denied: the typed tool disappears and the gws draft command is refused.
+  await set({ "gmail.drafts.write": "deny", "gmail.send": "deny" });
+  assert.ok(!visible().includes("google__create_draft"));
+  assert.equal((await s.call("create_draft", { to: ["reader@example.test"] })).error, "connector_operation_denied");
+  assert.equal((await s.call("gws_write", { args: [...send, "--draft"] })).detail.operation, "gmail.drafts.write");
+  assert.equal((await s.call("gws_write", { args: send })).error, "connector_operation_denied");
+  // A write sent to the read tool still points to the write tool unless denied.
+  assert.equal((await s.call("gws_read", { args: ["gmail", "users", "messages", "list"] })).status, "completed");
+
+  // Every write operation denied: gws_write is no longer offered; names and schemas of the rest do not change.
+  await set(Object.fromEntries(Object.entries(operations(await s.service.policy("google", signal())))
+    .filter(([, o]) => o.risk !== "read" && o.available !== false || o.unavailableReason === "scope_required").map(([id]) => [id, "deny"])));
+  assert.ok(!visible().includes("google__gws_write") && !visible().includes("google__label_thread"));
+  for (const tool of s.service.tools(s.caller)) assert.deepEqual(tool.inputSchema, before.find((b) => b.name === tool.name).inputSchema);
 });

@@ -1,5 +1,6 @@
 export { canonical, digest, type Json } from "./canonical.js";
-export { ConnectorError, type ConnectionConfig, type Connector, type Credentials, type Risk, type ToolContext, type ToolDefinition } from "./connector.js";
+export { ConnectorError, type ConnectionConfig, type Connector, type Credentials, type OperationCatalog, type OperationGroup, type OperationRisk, type OperationSpec, type PolicySetting, type Risk, type ToolContext, type ToolDefinition } from "./connector.js";
+export { GENERIC_CATALOG, defaultSetting, type OperationView as PolicyOperationView } from "./policy.js";
 export { loadConfig, readSealingKey, type LoadedConfig } from "./config.js";
 export { Sealer, EnvelopeSealer, type ValueSealer, type KeyWrapper } from "./sealer.js";
 export { SecretFiles } from "./secret-files.js";

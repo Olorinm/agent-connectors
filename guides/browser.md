@@ -37,10 +37,13 @@ agent-browser snapshot -i                # refs change when the page changes; ta
 - **Run directly**: navigation (`open`, `back`, `tab new <url>`, …), `snapshot`, `get`, `is`, `find`, `wait`,
   clicks, typing, keys, scrolling, `select`, `frame`, `dialog`, `set viewport|device|media`, `read` (current
   page), `screenshot`, `pdf`, `download`, `close`.
-- **Asks the owner**: `agent-browser upload <file-input> <file...>` sends workspace files to the current site.
+- **Asks the owner** unless they allowed it: `agent-browser upload <file-input> <file...>` sends workspace files to the current site.
   The owner sees the files and the site on an approval card; the command waits for the decision. If it is
   declined, tell the owner and do not retry another way. Target the file input itself (its ref, or a CSS
   selector such as `"input[type=file]"`).
+- The owner can set each operation to run directly, to ask every time, or to not allowed. A refused one
+  fails with `connector_operation_denied`; do not work around it, tell the owner if you need it. In scheduled
+  or delegated work, operations that ask fail with `connector_operation_requires_approval`.
 - **Not available**: `cookies`, `storage`, `state`, `auth`, `eval` and other page JavaScript, `network`,
   `set headers|credentials`, `connect`, `close --all`, `install`, `batch`, `stream`, `dashboard`. Do not try to read
   cookies or tokens from pages.

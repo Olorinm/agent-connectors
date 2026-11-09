@@ -159,6 +159,18 @@ export function parseCommand(input: string[]): Command {
   return result;
 }
 
+const NAVIGATE = new Set(["open", "goto", "navigate", "back", "forward", "reload", "tab", "frame"]);
+const READ = new Set(["snapshot", "read", "get", "is", "screenshot", "pdf", "diff", "wait"]);
+
+/** The owner-adjustable operation of a checked command; help, skills and close are outside the policy. */
+export function commandOperation(command: Command): string | null {
+  if (command.kind === "guide" || command.kind === "close") return null;
+  if (command.kind === "download") return "browser.download";
+  if (command.kind === "upload") return "browser.upload";
+  const base = command.name.split(" ")[0]!;
+  return NAVIGATE.has(base) ? "browser.navigate" : READ.has(base) ? "browser.read" : "browser.interact";
+}
+
 /** agent-browser prepends https:// to a bare host; the same URL is checked and then passed on explicitly. */
 function navigable(value: string) {
   return allowedUrl(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) && !/^[^/:]+:\d+(\/|$)/.test(value) ? value : `https://${value}`);

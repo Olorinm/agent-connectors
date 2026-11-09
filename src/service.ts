@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { canonical, digest, type Json } from "./canonical.js";
-import { ConnectorError, type ConnectionConfig, type Connector, type Credentials, type ToolDefinition } from "./connector.js";
+import { ConnectorError, type ConnectionConfig, type Connector, type Credentials, type OperationCatalog, type OperationSpec, type PolicySetting, type ToolDefinition } from "./connector.js";
+import { GENERIC_CATALOG, defaultSetting, effectiveSettings, policyInput, policyView } from "./policy.js";
 import type { ValueSealer } from "./sealer.js";
 import type { OperationRow, OperationStatus, Store } from "./store.js";
 import type { Caller, Grant } from "./tokens.js";
@@ -49,6 +50,8 @@ interface Payload {
   summary: string;
   outcome?: CallOutcome;
   definition?: string;
+  /** The owner-adjustable operation; its setting is checked again when the owner approves. */
+  operation?: string;
 }
 
 interface Entry {
@@ -127,6 +130,17 @@ export class ConnectorService {
     const account = connector.account;
     if ((action === "complete" && !account.complete) || (action === "configure" && !account.configure))
       throw new ServiceError("connection_action_unsupported", 404);
+    let scopes: string[] | undefined;
+    if (action === "connect" && input !== undefined) {
+      // Added scopes are limited to those this connection's operations name, and only where the connector supports it.
+      const parsed = z.object({ scopes: z.array(z.string().max(200)).min(1).max(20).optional() }).strict().safeParse(input);
+      if (!parsed.success) throw new ServiceError("connect_input_invalid", 400);
+      if (parsed.data.scopes) {
+        const grantable = new Set(this.#catalog(connection).operations.flatMap((operation) => operation.grantScope ? [operation.grantScope] : []));
+        if (!account.scopes || !parsed.data.scopes.every((scope) => grantable.has(scope))) throw new ServiceError("connect_scope_not_allowed", 400);
+        scopes = [...new Set(parsed.data.scopes)];
+      }
+    }
     if (action !== "status" && action !== "complete") {
       // Old approvals may not be used against a newly linked external account.
       for (const row of this.options.store.operations("pending"))
@@ -137,11 +151,83 @@ export class ConnectorService {
       const context = { connection, credentials: this.#credentials(id), signal };
       if (action === "configure") return await account.configure!(context, input);
       if (action === "complete") return await account.complete!(context);
+      if (action === "connect") return await account.connect(context, scopes ? { scopes } : undefined);
       return await account[action](context);
     } catch (error) {
       if (error instanceof ConnectorError) return { status: error.code, ...(error.detail ? { detail: error.detail } : {}) };
       return { status: "connection_check_failed" };
     }
+  }
+
+  /**
+   * The owner's operation settings for a connection (trusted management only). Changes apply from the next call;
+   * tool definitions do not change, only which tools are listed and how their calls are admitted.
+   */
+  async policy(id: string, signal: AbortSignal): Promise<Json> {
+    const connection = this.#connections.get(id), connector = this.#connectors.get(id);
+    if (!connection || !connector) throw new ServiceError("connection_not_found", 404);
+    const catalog = this.#catalog(connection), account = connector.account;
+    const granted = account?.scopes
+      ? await account.scopes({ connection, credentials: this.#credentials(id), signal }).catch(() => undefined) : undefined;
+    return policyView(catalog, this.#settings(connection), granted, !!account?.scopes) as unknown as Json;
+  }
+
+  async setPolicy(id: string, input: unknown, signal: AbortSignal): Promise<Json> {
+    const connection = this.#connections.get(id);
+    if (!connection) throw new ServiceError("connection_not_found", 404);
+    const parsed = policyInput.safeParse(input);
+    if (!parsed.success || Object.keys(parsed.data.settings).length > 300) throw new ServiceError("policy_input_invalid", 400);
+    const catalog = this.#catalog(connection), stored = { ...this.options.store.policy(id) };
+    for (const [operation, setting] of Object.entries(parsed.data.settings)) {
+      const spec = catalog.operations.find((candidate) => candidate.id === operation);
+      if (!spec) throw new ServiceError("policy_operation_unknown", 400);
+      if (spec.supported === false) throw new ServiceError("policy_operation_not_supported", 400);
+      stored[operation] = setting;
+    }
+    // Only choices that differ from the defaults are kept, so improved defaults reach untouched operations.
+    const kept = Object.fromEntries(Object.entries(stored).filter(([operation, setting]) => {
+      const spec = catalog.operations.find((candidate) => candidate.id === operation);
+      return spec && setting !== defaultSetting(spec.risk);
+    }));
+    this.options.store.putPolicy(id, kept, this.#now());
+    return this.policy(id, signal);
+  }
+
+  async resetPolicy(id: string, signal: AbortSignal): Promise<Json> {
+    if (!this.#connections.has(id)) throw new ServiceError("connection_not_found", 404);
+    this.options.store.putPolicy(id, {}, this.#now());
+    return this.policy(id, signal);
+  }
+
+  #catalog(connection: ConnectionConfig): OperationCatalog {
+    return this.#connectors.get(connection.id)!.operations?.(connection) ?? GENERIC_CATALOG;
+  }
+  #settings(connection: ConnectionConfig) {
+    return effectiveSettings(this.#catalog(connection), this.options.store.policy(connection.id));
+  }
+  /** Operations a tool can perform; [] when it is outside the policy, undefined for an unmapped write (never offered). */
+  #toolOperations(connection: ConnectionConfig, tool: ToolDefinition): string[] | undefined {
+    if (tool.operations) return tool.operations;
+    if (!this.#connectors.get(connection.id)!.operations) return [tool.risk];
+    return tool.risk === "read" ? [] : undefined;
+  }
+  /** The operation this exact call performs, or null when the policy does not apply. */
+  async #resolve(entry: Entry, input: Json, signal: AbortSignal): Promise<{ operation: OperationSpec | null } | CallOutcome> {
+    const { connection, tool } = entry;
+    let id: string | null | undefined;
+    try {
+      if (tool.operation) id = await tool.operation({ connection, credentials: this.#credentials(connection.id), signal }, input);
+      else {
+        const operations = this.#toolOperations(connection, tool);
+        id = operations?.length === 0 ? null : operations?.length === 1 ? operations[0] : undefined;
+      }
+    } catch (error) {
+      if (error instanceof ConnectorError) return { status: "failed", error: error.code, ...(error.detail !== undefined ? { detail: error.detail } : {}) };
+      return { status: "failed", error: "connection_check_failed" };
+    }
+    if (id === null) return { operation: null };
+    const operation = this.#catalog(connection).operations.find((candidate) => candidate.id === id && candidate.supported !== false);
+    return operation ? { operation } : { status: "failed", error: "connector_operation_unknown" };
   }
 
   async oauthCallback(state: string, code: string | undefined, signal: AbortSignal) {
@@ -179,12 +265,32 @@ export class ConnectorService {
   /** Tools visible to this caller: only connections it was issued for and its owner holds. */
   tools(caller: Caller): ExposedTool[] {
     const visible: ExposedTool[] = [];
+    const policies = new Map<string, { catalog: OperationCatalog; settings: Map<string, PolicySetting> }>();
     for (const [name, { connection, tool, schema }] of this.#tools) {
       if (!this.#allowed(caller, connection) || (caller.readOnly && tool.risk !== "read")) continue;
-      visible.push({
-        name, risk: tool.risk, inputSchema: schema,
-        description: `${connection.label ?? connection.id}: ${tool.description}${tool.risk === "write" ? " Requires the owner's approval on a trusted device unless pre-approved; returns approval_required with an operationId. Never ask the owner to paste approvals into chat." : ""}`,
-      });
+      const operations = this.#toolOperations(connection, tool);
+      if (!operations) continue;
+      let policy = policies.get(connection.id);
+      if (!policy) { policy = { catalog: this.#catalog(connection), settings: this.#settings(connection) }; policies.set(connection.id, policy); }
+      const specs = operations.flatMap((id) => policy!.catalog.operations.filter((o) => o.id === id && o.supported !== false));
+      // Reads through a read tool; a write named by a read tool is refused there and is not this tool's to offer.
+      const own = tool.risk === "read" ? specs.filter((o) => o.risk === "read") : specs;
+      const setting = (o: OperationSpec) => policy!.settings.get(o.id)!;
+      const usable = own.filter((o) => setting(o) === "allow" || (setting(o) === "ask" && !caller.readOnly));
+      // A tool whose operations the owner all denied (or, here, cannot approve) is not offered at all.
+      if (operations.length && !usable.length) continue;
+      const labels = (list: OperationSpec[]) => list.map((o) => o.label).join("; ");
+      const ask = usable.filter((o) => setting(o) === "ask"), denied = specs.filter((o) => setting(o) === "deny");
+      const unapprovable = caller.readOnly ? own.filter((o) => setting(o) === "ask") : [];
+      const notes = [
+        operations.length === 0 && tool.risk === "write" || ask.length && ask.length === usable.length && tool.risk === "write"
+          ? "Requires the owner's approval on a trusted device unless pre-approved; returns approval_required with an operationId. Never ask the owner to paste approvals into chat."
+          : ask.length ? `Needs the owner's approval on a trusted device for: ${labels(ask)}; returns approval_required with an operationId. Never ask the owner to paste approvals into chat.` : "",
+        denied.length ? `The owner does not allow: ${labels(denied)} (refused with connector_operation_denied).` : "",
+        unapprovable.length ? `Needs the owner's approval, which cannot be given here: ${labels(unapprovable)}.` : "",
+      ].filter(Boolean);
+      visible.push({ name, risk: tool.risk, inputSchema: schema,
+        description: `${connection.label ?? connection.id}: ${tool.description}${notes.map((note) => ` ${note}`).join("")}` });
     }
     visible.push({
       name: STATUS_TOOL, risk: "read", description: "Check an operation that required approval: pending, completed (with result), denied, expired or failed.",
@@ -217,19 +323,30 @@ export class ConnectorService {
     } catch {
       return { status: "failed", error: "arguments_not_plain_json" };
     }
-    if (entry.tool.risk === "read") return this.#execute(entry, input, signal);
+    const resolved = await this.#resolve(entry, input, signal);
+    if ("status" in resolved) return resolved;
+    const operation = resolved.operation;
+    // A write named by a read tool is refused by that tool itself, pointing to the write tool; only deny applies here.
+    const mismatch = operation && entry.tool.risk === "read" && operation.risk !== "read";
+    const setting: PolicySetting = operation ? this.#settings(entry.connection).get(operation.id)! : entry.tool.risk === "read" ? "allow" : "ask";
+    if (setting === "deny") return { status: "failed", error: "connector_operation_denied",
+      detail: { operation: operation!.id, label: operation!.label, instruction: "The owner does not allow this operation for this connection. Do not retry or work around it; tell the owner if it is needed." } };
+    if (mismatch || (entry.tool.risk === "read" && setting === "allow")) return this.#execute(entry, input, signal);
+    if (caller.readOnly) return { status: "failed", error: "connector_operation_requires_approval",
+      detail: { operation: operation?.id ?? null, ...(operation ? { label: operation.label } : {}),
+        instruction: "The owner set this operation to need their approval each time, and approval cannot be given in this context (for example scheduled or delegated work). Do not retry here." } };
     const now = this.#now(), id = randomUUID();
     const summary = (entry.tool.summarize?.(input, entry.connection) ?? `${entry.tool.name} on ${entry.connection.label ?? entry.connection.id}`).slice(0, 2000);
     const content = contentDigest(caller.owner, entry.connection.id, entry.tool.name, input);
     // Pre-approval never repeats a write whose earlier outcome is unknown; the owner decides.
-    const auto = this.#preApproved(entry, input) && !this.options.store.hasStatus(content, "uncertain");
+    const auto = (setting === "allow" || (entry.tool.risk === "write" && this.#preApproved(entry, input))) && !this.options.store.hasStatus(content, "uncertain");
     const row: OperationRow = {
       id, owner: caller.owner, agentId: caller.agentId, connectionId: entry.connection.id, tool: entry.tool.name,
       status: auto ? "executing" : "pending", content,
       digest: operationDigest({ id, owner: caller.owner, agentId: caller.agentId, connectionId: entry.connection.id, tool: entry.tool.name, input }),
       createdAt: now.toISOString(), updatedAt: now.toISOString(), expiresAt: new Date(now.getTime() + this.#ttl * 1000).toISOString(), payload: "",
     };
-    const payload: Payload = { input, summary, ...(entry.tool.version ? { definition: entry.tool.version } : {}) };
+    const payload: Payload = { input, summary, ...(entry.tool.version ? { definition: entry.tool.version } : {}), ...(operation ? { operation: operation.id } : {}) };
     row.payload = await this.#seal(row, payload);
     this.options.store.insertOperation(row);
     if (auto) return this.#finish(row, entry, payload, signal);
@@ -264,6 +381,11 @@ export class ConnectorService {
     const entry = connection && this.#tools.get(toolName(connection, { name: row.tool }));
     if (!entry || entry.connection.owner !== row.owner) throw new ServiceError("connection_unavailable", 409);
     if (payload.definition !== entry.tool.version) throw new ServiceError("tool_or_account_changed", 409);
+    // The owner may have denied the operation after the request was shown.
+    if (payload.operation && this.#settings(entry.connection).get(payload.operation) === "deny") {
+      this.options.store.transition(row.id, "pending", "denied", now);
+      throw new ServiceError("connector_operation_denied", 409);
+    }
     if (!this.options.store.consume(grant.tokenId, grant.expiresAt, now)) throw new ServiceError("grant_already_used", 409);
     if (!this.options.store.transition(row.id, "pending", "executing", now)) throw new ServiceError("operation_not_pending", 409);
     return this.#finish(row, entry, payload, signal);

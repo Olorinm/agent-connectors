@@ -24,7 +24,8 @@ const MAX_MCP_BODY = 15_000_000;
  *   GET  /v1/operations                pending operations (service token)
  *   GET  /v1/operations/:id            one operation, for the approval screen (service token)
  *   GET  /v1/connections[/:id]         account status (service token)
- *   POST /v1/connections/:id/connect|disconnect|complete   (service token)
+ *   POST /v1/connections/:id/connect|disconnect|complete   (service token); connect may carry {scopes} to add
+ *   GET|PUT /v1/connections/:id/policy, POST /v1/connections/:id/policy/reset   owner operation settings (service token)
  *   POST /v1/connections/:id/application   product hand-over of application configuration (service token)
  *   POST /v1/operations/:id/approve    {grant} — the grant itself authorizes execution
  *   POST /v1/operations/:id/deny       (service token)
@@ -62,8 +63,15 @@ async function handle(options: HttpOptions, request: IncomingMessage, response: 
     const signal = AbortSignal.timeout(60_000);
     if (path.length === 2 && request.method === "GET") return reply(response, 200, { connections: await options.service.connections(signal) });
     if (path.length === 3 && request.method === "GET") return reply(response, 200, await options.service.account(path[2]!, "status", signal));
-    if (path.length === 4 && request.method === "POST" && ["connect", "disconnect", "complete"].includes(path[3]!))
-      return reply(response, 200, await options.service.account(path[2]!, path[3] as "connect" | "disconnect" | "complete", signal));
+    if (path.length === 4 && path[3] === "policy" && request.method === "GET") return reply(response, 200, await options.service.policy(path[2]!, signal));
+    if (path.length === 4 && path[3] === "policy" && request.method === "PUT")
+      return reply(response, 200, await options.service.setPolicy(path[2]!, await body(request), signal));
+    if (path.length === 5 && path[3] === "policy" && path[4] === "reset" && request.method === "POST")
+      return reply(response, 200, await options.service.resetPolicy(path[2]!, signal));
+    if (path.length === 4 && request.method === "POST" && path[3] === "connect")
+      return reply(response, 200, await options.service.account(path[2]!, "connect", signal, await body(request, MAX_BODY, true)));
+    if (path.length === 4 && request.method === "POST" && ["disconnect", "complete"].includes(path[3]!))
+      return reply(response, 200, await options.service.account(path[2]!, path[3] as "disconnect" | "complete", signal));
     // The product hands over application configuration it already holds; secrets are accepted, never returned.
     if (path.length === 4 && request.method === "POST" && path[3] === "application")
       return reply(response, 200, await options.service.account(path[2]!, "configure", signal, await body(request)));
@@ -138,7 +146,8 @@ function bearer(request: IncomingMessage) {
   return match[1]!;
 }
 
-async function body(request: IncomingMessage, limit = MAX_BODY): Promise<unknown> {
+/** With `optional`, an empty body is undefined rather than invalid JSON. */
+async function body(request: IncomingMessage, limit = MAX_BODY, optional = false): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
@@ -146,8 +155,10 @@ async function body(request: IncomingMessage, limit = MAX_BODY): Promise<unknown
     if (size > limit) throw new HttpError(413, "body_too_large");
     chunks.push(chunk as Buffer);
   }
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (optional && !text.trim()) return undefined;
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(text);
   } catch {
     throw new HttpError(400, "invalid_json");
   }

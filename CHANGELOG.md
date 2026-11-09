@@ -4,6 +4,26 @@ Notable changes to Agent Connectors, newest first. Each version has a GitHub Rel
 notes and the package archive. When releasing, add the new section here in the version-bump commit;
 the Release notes are copied from it.
 
+## [0.1.0-alpha.11] - 2026-11-09
+
+- Owner operation policy per connection: every operation can be set to `allow` (runs directly, writes included),
+  `ask` (approval for every call, reads included) or `deny` (not listed and refused with
+  `connector_operation_denied`). Defaults: reads allow, writes ask. Settings are stored per connection, survive
+  disconnect and reconnect, apply from the next call and never change tool names or schemas.
+  - `GET|PUT /v1/connections/:id/policy` and `POST /v1/connections/:id/policy/reset` (service token).
+  - Catalogs: Gmail (read, write and delete groups; unsupported unsubscribe and background sync are listed as
+    such), Feishu (docs, calendar, messages, other; read and write each), browser (navigate, read, interact,
+    download, upload). Other connectors get one read and one write operation.
+  - gws calls resolve to the operation of their Discovery method, lark-cli calls to their domain, agent-browser
+    calls to their command; help, schemas and dry runs are outside the policy.
+  - Read-only callers get `connector_operation_requires_approval` for operations set to ask.
+  - An approval is refused when its operation was denied in the meantime.
+- Operations whose scopes are not granted are reported `scope_required`; Google can add them with incremental
+  consent (`POST /v1/connections/:id/connect` with `{ "scopes": [...] }`, limited to the catalog's grant scopes),
+  keeping the current authorization until the new consent completes.
+- Account status reports `accountEmail` (Gmail profile) and `accountName` (Feishu), and keeps a pending Google
+  consent link (`authorizationUrl`, `expiresAt`) while it is valid.
+
 ## [0.1.0-alpha.10] - 2026-11-09
 
 - Browser connector runs the official agent-browser CLI (`agent-browser` 0.41.2, pinned) against Cloudflare Browser

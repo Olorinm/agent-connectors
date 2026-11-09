@@ -41,6 +41,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS operations_status ON operations (status, owner);
       CREATE INDEX IF NOT EXISTS operations_content ON operations (content, status);
       CREATE TABLE IF NOT EXISTS consumed_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS policies (connection_id TEXT PRIMARY KEY, settings TEXT NOT NULL, updated_at TEXT NOT NULL);
     `);
   }
   credential(connectionId: string): string | undefined {
@@ -51,6 +52,17 @@ export class Store {
     this.db.prepare(
       "INSERT INTO credentials (connection_id, sealed, updated_at) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET sealed = excluded.sealed, updated_at = excluded.updated_at",
     ).run(connectionId, sealed, now.toISOString());
+  }
+  /** The owner's operation settings that differ from the defaults; kept across disconnect and reconnect. */
+  policy(connectionId: string): Record<string, string> {
+    const row = this.db.prepare("SELECT settings FROM policies WHERE connection_id = ?").get(connectionId) as { settings: string } | undefined;
+    return row ? JSON.parse(row.settings) as Record<string, string> : {};
+  }
+  putPolicy(connectionId: string, settings: Record<string, string>, now: Date) {
+    if (!Object.keys(settings).length) { this.db.prepare("DELETE FROM policies WHERE connection_id = ?").run(connectionId); return; }
+    this.db.prepare(
+      "INSERT INTO policies (connection_id, settings, updated_at) VALUES (?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET settings = excluded.settings, updated_at = excluded.updated_at",
+    ).run(connectionId, JSON.stringify(settings), now.toISOString());
   }
   insertOperation(row: OperationRow) {
     this.db.prepare(

@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Json } from "../../canonical.js";
-import { ConnectorError, type ConnectionConfig, type Connector, type ToolDefinition } from "../../connector.js";
+import { ConnectorError, type ConnectionConfig, type Connector, type OperationCatalog, type ToolDefinition } from "../../connector.js";
 import { FeishuAccount, feishuApplicationSchema, installFeishuApplication, loadFeishuCredentials, runOfficialCli, type CliResult, type CliRunner } from "./account.js";
-import { ArgumentsError, UnconfiguredCli, checkArguments, guidanceArgs, withFlags } from "./classify.js";
+import { ArgumentsError, UnconfiguredCli, checkArguments, guidanceArgs, withFlags, type Classification } from "./classify.js";
 
 const MAX_FILES_BYTES = 20_000_000;
 const MAX_ARTIFACT_BYTES = 10_000_000;
@@ -21,6 +21,31 @@ const settings = z.object({ directory: z.string().min(1) }).strict();
 
 /** Error types the CLI reports before any request takes effect. */
 const NO_EFFECT = new Set(["validation", "authentication", "authorization", "confirmation_required"]);
+
+/** Owner-adjustable operations: one read and one write per group of lark-cli domains. */
+const GROUPS = [
+  { id: "docs", label: "Docs, wiki and drive", labelZh: "文档、知识库和云空间",
+    domains: ["docs", "wiki", "drive", "sheets", "slides", "base", "mindnotes", "markdown", "whiteboard", "note"],
+    read: ["Read docs, wikis, sheets and files", "读取文档、知识库、表格和文件"], write: ["Create and edit docs, wikis, sheets and files", "创建和编辑文档、知识库、表格和文件"] },
+  { id: "calendar", label: "Calendar and meetings", labelZh: "日历和会议", domains: ["calendar", "vc", "minutes"],
+    read: ["View calendars, events and meeting records", "查看日程和会议记录"], write: ["Create and change events and meetings", "创建和修改日程与会议"] },
+  { id: "im", label: "Messages and mail", labelZh: "消息和邮件", domains: ["im", "mail"],
+    read: ["Read chats and mail", "读取聊天记录和邮件"], write: ["Send messages and mail", "发送消息和邮件"] },
+  { id: "other", label: "Other", labelZh: "其他", domains: [] as string[],
+    read: ["Read contacts, tasks, approvals and other data", "读取通讯录、任务、审批等其他数据"],
+    write: ["Change tasks, approvals and other data", "修改任务、审批等其他数据"] },
+];
+const feishuCatalog: OperationCatalog = {
+  groups: GROUPS.map(({ id, label, labelZh }) => ({ id, label, labelZh })),
+  operations: GROUPS.flatMap((group) => (["read", "write"] as const).map((risk) => ({
+    id: `feishu.${group.id}.${risk}`, group: group.id, label: group[risk][0]!, labelZh: group[risk][1]!, risk }))),
+};
+/** The operation of an argument list: its lark-cli domain decides the group, the tool decides read or write. */
+export function feishuOperation(args: string[], risk: "read" | "write") {
+  const group = GROUPS.find((candidate) => candidate.domains.includes(args[0] ?? "")) ?? GROUPS.at(-1)!;
+  return `feishu.${group.id}.${risk}`;
+}
+const operationsOf = (risk: "read" | "write") => GROUPS.map((group) => `feishu.${group.id}.${risk}`);
 
 export interface FeishuOptions {
   runner?: CliRunner;
@@ -51,9 +76,29 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
   };
   let unconfigured: UnconfiguredCli | undefined;
   const cli = () => (unconfigured ??= new UnconfiguredCli(options.classifierDirectory ?? mkdtempSync(join(tmpdir(), "agent-connectors-lark-")), options.runner ?? runOfficialCli));
+  // A command's declared risk depends only on its arguments; the policy check and the run ask the CLI once.
+  const classified = new Map<string, Promise<Classification>>();
+  const classify = (args: string[]) => {
+    const key = JSON.stringify(args);
+    let result = classified.get(key);
+    if (!result) {
+      if (classified.size >= 200) classified.delete(classified.keys().next().value!);
+      result = cli().classify(args);
+      classified.set(key, result);
+      result.catch(() => classified.delete(key));
+    }
+    return result;
+  };
 
   const read: ToolDefinition<Input> = {
-    name: "cli_read", risk: "read", input,
+    name: "cli_read", risk: "read", input, operations: operationsOf("read"),
+    // Guidance (skills, schema, --help) runs on an unconfigured CLI and reads nothing of the owner's. A command the CLI
+    // does not declare read is the group's write: refused here pointing to cli_write, unless that write is denied.
+    operation: async (_context, value) => {
+      if (guidanceArgs(value.args)) return null;
+      check(value.args);
+      return feishuOperation(value.args, (await classify(value.args)).risk === "read" ? "read" : "write");
+    },
     description: "Run an official lark-cli command for the owner's Feishu that only reads (declared Risk: read, and every request in its dry-run plan reads), or guidance: " +
       "`skills read <name>`, `schema <service.resource.method>`, `<domain> --help`. Pass argument strings without the executable or shell syntax. " +
       "Commands the CLI marks write or high-risk-write are refused here; use cli_write. Do not pass --as or --profile. " +
@@ -66,7 +111,7 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
       }
       check(value.args);
       // Two independent checks: the CLI's declared risk, and the requests its dry-run would send.
-      const { risk, command } = await cli().classify(value.args);
+      const { risk, command } = await classify(value.args);
       if (risk !== "read") throw new ConnectorError("feishu_command_requires_write_tool", { command, risk: risk ?? "unknown" });
       const plan = await cli().plan(value.args);
       if (!plan.readOnly) throw new ConnectorError("feishu_command_requires_write_tool", { command, risk, requests: plan.requests });
@@ -74,7 +119,8 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
     },
   };
   const write: ToolDefinition<Input> = {
-    name: "cli_write", risk: "write", input,
+    name: "cli_write", risk: "write", input, operations: operationsOf("write"),
+    operation: (_context, value) => feishuOperation(value.args, "write"),
     description: "Run an official lark-cli command that changes the owner's Feishu (send mail or messages, create or edit documents, records, events, approvals). " +
       "The exact arguments are shown to the owner for approval before anything runs; high-risk confirmation is added after approval, so do not pass --yes. " +
       "Attach local files through `files` and refer to them by name in args.",
@@ -82,7 +128,7 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
     async execute({ connection }, value) {
       check(value.args);
       // The owner approved these exact arguments, so a high-risk command receives its confirmation here.
-      const { risk } = await cli().classify(value.args);
+      const { risk } = await classify(value.args);
       const flags = risk === "high-risk-write" && !value.args.includes("--yes") ? ["--yes=true"] : [];
       return withSecrets(() => run(account(connection), value, { write: true, flags }));
     },
@@ -92,10 +138,10 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
     const { status: cliStatus, state, ...rest } = status;
     // A pending re-authorization keeps the reason it was needed.
     const current = state !== "connected" && pending ? "authorization_pending" : state;
-    return { ...rest, status: current, cliStatus, ownerPrivate: true,
+    return { ...rest, status: current, cliStatus, ownerPrivate: true, ...(rest.userName ? { accountName: rest.userName } : {}),
       ...(current === "authorization_pending" ? { authorizationUrl: pending!.verificationUrl, expiresAt: pending!.expiresAt } : {}) };
   };
-  return { kind: "feishu", usage: "owner_private", tools: [read, write], account: {
+  return { kind: "feishu", usage: "owner_private", tools: [read, write], operations: () => feishuCatalog, account: {
     async status({ connection }): Promise<Json> {
       return withSecrets(async (): Promise<Json> => {
       let feishu: FeishuAccount;
