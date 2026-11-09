@@ -347,3 +347,25 @@ test("hand-over and completion over HTTP require the service token", async (t) =
   const listed = await (await fetch(`${started.url}/v1/connections`, { headers: { Authorization: `Bearer ${token}` } })).json();
   assert.equal(listed.connections[0].usage, "owner_private");
 });
+
+test("Feishu policy: lark-cli domains are grouped, each group's reads and writes are set separately", async (t) => {
+  const f = await feishu(t);
+  const view = await f.service.policy("work-feishu", signal());
+  assert.deepEqual(view.groups.map((g) => [g.id, g.labelZh, g.operations.map((o) => `${o.id}:${o.setting}`)]), [
+    ["docs", "文档、知识库和云空间", ["feishu.docs.read:allow", "feishu.docs.write:ask"]],
+    ["calendar", "日历和会议", ["feishu.calendar.read:allow", "feishu.calendar.write:ask"]],
+    ["im", "消息和邮件", ["feishu.im.read:allow", "feishu.im.write:ask"]],
+    ["other", "其他", ["feishu.other.read:allow", "feishu.other.write:ask"]],
+  ]);
+  await f.service.setPolicy("work-feishu", { settings: { "feishu.im.read": "deny", "feishu.im.write": "allow" } }, signal());
+  const denied = await f.call("cli_read", ["mail", "+triage"]);
+  assert.deepEqual([denied.error, denied.detail.operation], ["connector_operation_denied", "feishu.im.read"]);
+  assert.equal((await f.call("cli_read", ["drive", "+download", "--file-token", "x"])).status, "completed");
+  assert.equal((await f.call("cli_read", ["skills", "read", "lark-mail"])).status, "completed", "guidance is outside the policy");
+  // Sending allowed: runs at once; writes in other groups still ask.
+  assert.equal((await f.call("cli_write", ["mail", "+send", "--to", "a@example.test"])).status, "completed");
+  assert.equal((await f.call("cli_write", ["docs", "+create", "--title", "x"])).status, "approval_required");
+  assert.equal(f.cli.executed().filter((c) => c.args[0] === "mail" && c.args.includes("+triage")).length, 0);
+  // The authorized user's name is reported for the owner's account page.
+  assert.equal((await f.service.account("work-feishu", "status", signal())).accountName, "Alice");
+});

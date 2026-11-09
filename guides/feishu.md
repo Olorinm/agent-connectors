@@ -30,9 +30,12 @@ These guidance commands never touch the owner's data.
 - Commands run as the owner. Do not pass `--as`, `--profile` or `--user…`, and do not run
   `lark-cli auth …` or `config …`: identity and login are managed by Mau.
 - **Reads run immediately** when the CLI declares the command read-only and its dry-run plan only reads.
-- **Changes wait for the owner**: sending messages or mail, creating or editing documents, records,
+- **Changes wait for the owner** unless they allowed them: sending messages or mail, creating or editing documents, records,
   events, approvals. The owner sees the full command on an approval card; the command blocks until
   they decide. If it is declined, tell the owner and do not retry another way.
+- The owner can set each operation to run directly, to ask every time, or to not allowed. A refused one
+  fails with `connector_operation_denied`; do not work around it, tell the owner if you need it. In scheduled
+  or delegated work, operations that ask fail with `connector_operation_requires_approval`.
 - Not available: local file paths (`@file`, `-`, absolute or `~` paths), `+watch` and `+subscribe`.
   Files the CLI produces are returned as attachments.
 - If the owner's authorization is missing, expired or lacks a permission, the command reports

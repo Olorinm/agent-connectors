@@ -137,6 +137,16 @@ Important statuses:
 | `upstream_access_denied` / `google_api_access_denied` | Upstream rejected access; check enabled APIs, scopes and organization policy |
 | `upstream_unavailable` | Upstream transport could not be verified; no claim of successful connection |
 
+Account status also names the authorized account where known: `accountEmail` (Gmail, from the mailbox profile)
+and `accountName` (Feishu user). A pending consent keeps its `authorizationUrl` and `expiresAt` in the status
+while valid, so a product can show the link again after a reload.
+
+Owner operation settings (allow, ask, deny per operation) use the same service token:
+`GET /v1/connections/:id/policy`, `PUT /v1/connections/:id/policy` with `{ "settings": { "<operation>": "allow" } }`
+(partial), and `POST /v1/connections/:id/policy/reset`. Each returns the grouped operations with their setting,
+default and availability. `POST /v1/connections/:id/connect` with `{ "scopes": [...] }` adds scopes that
+operations marked `grantable` need (Google incremental consent). See [Security model](security-model.md#operation-policy).
+
 The remote `connection_status` tool is safe for Agents, but connect/disconnect are trusted management actions.
 No generic credential-import command is accepted for the three OAuth connectors.
 Google status includes `backend: "google-api"`, `verification: "oauth"`, and `apiAccess: "checked_on_use"`;
