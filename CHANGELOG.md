@@ -4,7 +4,7 @@ Notable changes to Agent Connectors, newest first. Each version has a GitHub Rel
 notes and the package archive. When releasing, add the new section here in the version-bump commit;
 the Release notes are copied from it.
 
-## [Unreleased]
+## [0.1.0-alpha.10] - 2026-11-09
 
 - Browser connector runs the official agent-browser CLI (`agent-browser` 0.41.2, pinned) against Cloudflare Browser
   Run, replacing the Playwright tools (`open`, `snapshot`, `click`, `type`, `press`, `screenshot`, `download`,
