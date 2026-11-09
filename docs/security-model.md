@@ -178,24 +178,80 @@ uncertain. Google tool definitions and account generations are included in the a
 
 ## Browser (Cloudflare Browser Run)
 
-The `browser` connector drives a remote Chromium on Cloudflare Browser Run through the official Playwright CDP
-client. The browser runs outside the Agent environment and outside this service; the Cloudflare API token
-(Browser Rendering - Edit only) is read from a private file and never returned. Site cookies are the connection's
-credential: they are sealed like other credentials, restored into a new remote browser, and never returned to callers.
+The `browser` connector drives a remote Chromium on Cloudflare Browser Run with the official agent-browser CLI
+(pinned), run by this service. The browser runs outside the Agent environment; the CLI and its daemon run here, as
+this service's user, with a private home directory per connection (mode 0700), an explicit empty configuration file
+and its local screencast disabled. The Cloudflare API token (Browser Rendering - Edit only) is read from a private
+file and reaches the CLI only through `AGENT_BROWSER_CDP_HEADERS`; it is never an argument, never written to disk and
+never returned. Session management and Live View use Browser Run's HTTP API from this service.
+
+Site cookies and local storage are the connection's credential. After every command the connector saves them with
+`agent-browser state save` into a private file, seals them and deletes the file; a new remote browser receives them
+through `state load` the same way. They are never returned to callers.
+
+The Agent passes agent-browser arguments, checked against an allowlist before anything runs:
+
+- Allowed: `open`/`goto`/`navigate`, `back`, `forward`, `reload`, `tab` (list, new, close, switch), `snapshot`,
+  `read` of the current page, `get` (except `cdp-url`), `is`, `find`, `wait` (selector, time, `--url`, `--load`,
+  `--text`), `click`, `dblclick`, `fill`, `type`, `press`, `keydown`/`keyup`, `keyboard type|inserttext`, `hover`,
+  `focus`, `check`, `uncheck`, `select`, `drag`, `scroll`, `scrollintoview`, `mouse`, `frame`, `dialog`,
+  `set viewport|device|media|geo|offline`, `diff snapshot`, `screenshot`, `pdf`, `download`, `close`, `skills
+  list|get` and `--help`/`--version`; each with its own reviewed flags. `upload` only through the write tool.
+- Refused, because they export or replace credentials and session data: `cookies`, `storage`, `state`, `auth`.
+- Refused, because page JavaScript can read `document.cookie`, local storage and authenticated responses:
+  `eval`, `wait --fn`, `addinitscript`, `--init-script`, `--enable`.
+- Refused, because they intercept or rewrite traffic: `network`, `set headers`, `set credentials`, `--headers`.
+- Refused, because they select another browser, profile, file or configuration: `connect`, `close --all`,
+  `session`, `profiles` and every global flag except `--json` (`--cdp`, `--cdp-headers`, `--profile`, `--state`,
+  `--session`, `--restore`, `--namespace`, `--executable-path`, `--extension`, `--args`, `--proxy`, `--config`,
+  `--download-path`, `--screenshot-dir`, `--allow-file-access`, `-p`, …).
+- Refused, because they manage the installation or open other control channels: `install`, `upgrade`, `doctor`,
+  `plugin`, `mcp`, `chat`, `dashboard`, `stream`, `inspect`, `batch` (it would bypass per-command checks), and
+  debugging or recording commands.
+
+Navigation URLs (`open`, `goto`, `navigate`, `tab new`) must be http(s) without embedded credentials, and loopback,
+private, link-local and `.internal` hosts are refused before a browser is attached; a bare host gets `https://`
+and the checked URL is what the CLI receives. Output paths (`screenshot`, `pdf`, `download`) are replaced by a file
+in a private per-call directory; only the requested file name is kept, the files are returned and the directory is
+deleted.
+
+Next to agent-browser the connector keeps one minimal Chrome DevTools Protocol connection to the same Browser Run
+session (`src/connectors/browser/cdp.ts`, Node's built-in WebSocket, the token only in its Authorization header). It
+covers what agent-browser cannot do against a remote browser; it is not a second automation path:
+
+- **Navigation guard.** Every document request in the browser is paused (`Fetch`, browser-wide, so new tabs and
+  redirect hops are included) and failed with `BlockedByClient` when its URL is not http(s), carries credentials, or
+  targets a loopback, private, link-local or `.internal` host. This applies to clicks, `click --new-tab`, form posts,
+  script navigations and redirects, not only to URLs the Agent types. Commands do not run unless the guard is
+  connected; a dropped connection is restored before the next command. Subresources (images, scripts, fetch/XHR) are
+  not intercepted, matching the earlier connector.
+- **Downloads.** Browser Run saves a download on its own machine and blocks reading it back, so agent-browser's
+  `download` cannot deliver the file. For `download <element> <name>` agent-browser clicks the element while the
+  guard, for that command only, also pauses document responses: an attachment (or any non-HTML document) is read with
+  `Fetch.getResponseBody`, answered with an empty 204 so the page stays, and returned (links on any site, form posts,
+  redirects checked hop by hop). Script-generated downloads (`blob:`/`data:` URLs) are read inside the page, through a
+  small hook that keeps created blobs readable after the page revokes their URL; the remote download is cancelled. At
+  most 10 MB.
+- **Structured handoff.** `Cloudflare.handoff` shows the Agent's instructions with Done/Failed buttons in the live
+  view; `handoff_status` reads `Cloudflare.getHandoffState` and the `Cloudflare.handoffComplete` outcome.
+
+`upload` lets agent-browser select the file input and name the files, then a fixed page script places the approved
+bytes into that input, because the remote browser cannot read this host's files. Page scripts are part of this
+service; Agent input reaches them only as JSON values.
 
 **Deliberate exception to "anything with an external effect is a write".** By product decision, matching how
-comparable assistants behave, `open`, `snapshot`, `click`, `type`, `press`, `screenshot` and `download` run without
-approval, so a click can submit a form or place an order on a site the owner is signed in to. Only `upload` (sending
-a file to a site) is a write: the owner approves the exact file and origin, and execution refuses a page whose origin
-differs from the approved `site`. Treat a browser connection as trusted with everything its stored sign-ins allow; do
-not store sign-ins for banking, payment or accounts where an unattended click is unacceptable.
+comparable assistants behave, navigation, clicks, typing, `screenshot`, `pdf` and `download` run without approval,
+so a click can submit a form or place an order on a site the owner is signed in to. Only `upload` (sending a file to
+a site) is a write: the owner approves the exact files and origin, and execution refuses a page whose origin differs
+from the approved `site`. Treat a browser connection as trusted with everything its stored sign-ins allow; do not
+store sign-ins for banking, payment or accounts where an unattended click is unacceptable.
 
-Navigation and downloads refuse non-http(s) URLs, embedded credentials, and loopback, private, link-local and
-`.internal` hosts before a browser is attached; each download redirect is checked again. Downloads are captured in
-the remote browser with the CDP Fetch domain (same cookies and egress as browsing, at most 10 MB) and returned as
-base64 for the composing product to store; nothing is written to this host. `handoff_start` returns a Live View URL
-that grants control of the browser until it expires. It is meant for the owner only, so a composer must deliver it to
-the owner directly, not to the model.
+`handoff_start` returns a Live View URL of the current tab that grants control of the browser until it expires. It
+is meant for the owner only, so a composer must deliver it to the owner directly, not to the model. The owner ends it
+with Done or Failed; `handoff_cancel` revokes it by closing that tab.
+
+agent-browser's npm package carries every platform's native binary (about 116 MB). Images keep only their own
+platform's binary (the Dockerfile deletes the others and marks it executable; about 18 MB for linux-x64).
 
 ## HTTP
 

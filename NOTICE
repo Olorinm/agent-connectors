@@ -6,6 +6,9 @@ src/connectors/feishu/account.ts is adapted from Agent Router
 
 The Feishu connector runs the official @larksuite/cli binary (MIT License, Lark Technologies).
 
+The browser connector runs the official agent-browser CLI (https://github.com/vercel-labs/agent-browser, Apache License
+2.0, Vercel), installed from its npm package.
+
 src/connectors/google/gmail-spec.ts contains tool and field descriptions copied from Google's Gmail MCP reference
 (https://developers.google.com/workspace/gmail/api/reference/mcp), Google Developers documentation licensed under
 the Creative Commons Attribution 4.0 License (https://creativecommons.org/licenses/by/4.0/).

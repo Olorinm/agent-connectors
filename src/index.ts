@@ -9,4 +9,4 @@ export { Store, type OperationStatus } from "./store.js";
 export { LIMITS, TOKEN_TYPES, TokenError, TokenVerifier, type Caller, type Grant, type Trust } from "./tokens.js";
 export { start, type Started } from "./start.js";
 export { startConfigured } from "./start-configured.js";
-export { builtinConnectors, feishuConnector, remoteConnector, googleConnector, browserConnector, CloudflareBrowserRun, type FeishuOptions, type GoogleOptions, type BrowserOptions, type BrowserRuntime, type BrowserSession } from "./connectors/index.js";
+export { builtinConnectors, feishuConnector, remoteConnector, googleConnector, browserConnector, CloudflareBrowserRun, type FeishuOptions, type GoogleOptions, type AgentBrowserRunner, type BrowserOptions, type BrowserRun } from "./connectors/index.js";

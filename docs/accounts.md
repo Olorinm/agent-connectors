@@ -9,7 +9,7 @@ connector host. The Agent receives only a short-lived caller token, never a prov
 | `google` | [Official Google APIs and Node SDKs](https://github.com/googleapis/google-api-nodejs-client) | Google Cloud OAuth web client and enabled product APIs; works with personal Google accounts |
 | `feishu` | Official `@larksuite/cli`, pinned version | Feishu app, app secret, permitted scopes, expected owner's `open_id` |
 | `notion` | [Official remote MCP](https://developers.notion.com/guides/mcp/build-mcp-client), `https://mcp.notion.com/mcp` | No manually registered app needed for the default dynamic registration flow |
-| `browser` | [Cloudflare Browser Run](https://developers.cloudflare.com/browser-run/) through the official Playwright CDP client | Cloudflare account ID and an API token limited to Browser Rendering - Edit, in a mode-0600 `tokenFile` |
+| `browser` | [Cloudflare Browser Run](https://developers.cloudflare.com/browser-run/) driven by the official [agent-browser](https://github.com/vercel-labs/agent-browser) CLI, pinned version | Cloudflare account ID and an API token limited to Browser Rendering - Edit, in a mode-0600 `tokenFile` |
 
 End users follow a consent link after this operator setup. They do not create OAuth applications themselves.
 Notion uses OAuth dynamic client registration. GitHub and Google use the application's registered client ID
@@ -193,12 +193,30 @@ waits for the owner, whose card shows the exact command. The access token reache
 
 `@olorinm/agent-connectors/guides` exports a guide per connector (`guides/*.md`): name, one-line description, the CLI
 command it exposes and the usage text. Products install the guides of an Agent's assigned connections, for example as
-skills next to a shell command that relays to `gws_*` or `cli_*` (see Agent Host's `agent-host-relay`). Feishu retains `cli_read` and `cli_write`.
+skills next to a shell command that relays to `gws_*`, `cli_*` or `agent_browser_*` (see Agent Host's `agent-host-relay`). Feishu retains `cli_read` and `cli_write`.
 
-The `browser` connection (settings `{ "accountId": "<32 hex>", "tokenFile": "browser-token" }`) exposes `open`,
-`snapshot` (accessibility tree with refs), `click`, `type`, `press`, `screenshot`, `download`, `handoff_start`,
-`handoff_status` and `close` without approval, and `upload` as a write approved per file and site. See
-[browser security](security-model.md#browser-cloudflare-browser-run) for why clicks are not writes here.
+The `browser` connection (settings `{ "accountId": "<32 hex>", "tokenFile": "browser-token" }`) runs the pinned
+agent-browser CLI inside this service, attached to the connection's Browser Run session:
+
+| Tool | Risk | Input |
+| --- | --- | --- |
+| `agent_browser_read` | read | `args`: an agent-browser argument list, e.g. `["snapshot","-i"]`. Navigation, snapshots, `get`/`is`/`find`/`wait`, clicks, typing, keys, `screenshot`, `pdf`, `download <element> <name>`, `close`, `--help` and `skills` |
+| `agent_browser_write` | write | `args` (`["upload","<file input>","<name>",…]`), `site` (the current page's https origin) and `files` (name, media type, base64) |
+| `handoff_start`, `handoff_status`, `handoff_cancel` | read | Live View of the current tab with Cloudflare's instructions banner and Done/Failed; `handoff_status` reports `done` and `success` |
+
+`agent_browser_read` refuses `upload` with `agent_browser_command_requires_write_tool`, every command outside its
+allowlist with `agent_browser_command_not_allowed`, and every global flag except `--json` with
+`agent_browser_flag_not_allowed`. `screenshot`, `pdf` and `download` return `files` (name, media type, size, base64);
+the composing product stores them. See [browser security](security-model.md#browser-cloudflare-browser-run) for the
+allowlist and why clicks are not writes here.
+
+The connection also keeps a minimal CDP connection to the same session for the navigation guard, downloads and the
+structured handoff; see [browser security](security-model.md#browser-cloudflare-browser-run).
+
+The package contains agent-browser's binaries for every platform. Its install script only marks the binary
+executable (and rewrites a global npm link when one exists), so it is denied in `allowScripts`; the connector runs
+the binary directly when it is executable and otherwise copies it once into its private directory. Images keep only
+their platform's binary, executable (see `Dockerfile`).
 
 Only exact names in the code-reviewed catalog are exposed. New upstream tools remain unavailable until reviewed.
 Upstream schemas validate input without transforming it. Google schemas apply documented defaults before the exact

@@ -4,6 +4,27 @@ Notable changes to Agent Connectors, newest first. Each version has a GitHub Rel
 notes and the package archive. When releasing, add the new section here in the version-bump commit;
 the Release notes are copied from it.
 
+## [0.1.0-alpha.10] - 2026-11-09
+
+- Browser connector runs the official agent-browser CLI (`agent-browser` 0.41.2, pinned) against Cloudflare Browser
+  Run, replacing the Playwright tools (`open`, `snapshot`, `click`, `type`, `press`, `screenshot`, `download`,
+  `upload`, `close`). `playwright-core` is no longer a dependency.
+  - `agent_browser_read` takes agent-browser arguments and runs an allowlist of commands; credentials, page
+    JavaScript, traffic interception, other browsers and global flags other than `--json` are refused.
+  - `agent_browser_write` runs `upload`, approved per file and site.
+  - `screenshot`, `pdf` and `download` return files; output paths stay in a private per-call directory.
+  - Cookies and local storage are saved with `state save` after every command and sealed; a new remote browser
+    restores them with `state load`.
+  - A minimal CDP connection to the same Browser Run session (Node's WebSocket, no new dependency) covers what
+    agent-browser cannot do against a remote browser: it refuses document requests to private, loopback, link-local
+    and non-http(s) addresses (including clicks, new tabs, form posts and redirects), captures downloads (links on
+    any site, form posts, script-generated files) because Browser Run keeps downloaded files on its own machine, and
+    runs Cloudflare's structured handoff.
+  - Handoff shows the instructions with Done/Failed in the live view; `handoff_status` reports `done` and `success`;
+    `handoff_cancel` closes the tab.
+  - The Docker image keeps only its platform's agent-browser binary.
+- Agent guide for the browser connector (`guides/browser.md`, command `agent-browser`).
+
 ## [0.1.0-alpha.9] - 2026-11-06
 
 - Feishu owner tools on a product-provided app (the same app a chat channel's bot uses).
