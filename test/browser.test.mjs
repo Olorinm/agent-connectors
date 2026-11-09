@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ConnectorService, Sealer, Store, browserConnector } from "../dist/index.js";
+import { ConnectorError, ConnectorService, Sealer, Store, browserConnector } from "../dist/index.js";
 import { parseCommand } from "../dist/connectors/browser/command.js";
 
 const ACCOUNT = "0123456789abcdef0123456789abcdef";
@@ -36,7 +36,6 @@ function fakeCli() {
       return { code: 0, stdout: `✓ Saved to ${path}`, stderr: "" };
     }
     if (command === "upload") { browser.uploads.push({ selector: rest[0], files: rest.slice(1).map((p) => ({ path: p, exists: existsSync(p) })) }); return { code: 0, stdout: "✓ Done", stderr: "" }; }
-    if (command === "eval" && input.includes("fetch(")) return json({ result: { url: "https://example.com/files/a.pdf", type: "application/pdf", base64: Buffer.from("%PDF-x").toString("base64") } });
     if (command === "eval" && input.includes("DataTransfer")) { browser.uploads.push({ placed: input.includes("YWJj") }); return json({ result: { ok: true } }); }
     if (command === "tab" && rest[0] === "list") return json({ tabs: browser.tabs });
     if (command === "tab" && rest[0] === "new") { browser.tabs = [...browser.tabs.map((t) => ({ ...t, active: false })), { tabId: "t2", targetId: "TARGET2", active: true }]; return { code: 0, stdout: "✓", stderr: "" }; }
@@ -58,15 +57,33 @@ function fakeBrowserRun(browser) {
   } };
 }
 
+/** Fake CDP guard: records captures and handoffs; `closed` can be flipped to simulate a dropped connection. */
+function fakeGuards() {
+  const log = [];
+  const state = { handoff: { active: true }, download: { name: "a.pdf", mediaType: "application/pdf", size: 6, contentBase64: Buffer.from("%PDF-x").toString("base64") } };
+  let created = 0;
+  const factory = async (account, sessionId) => {
+    const guard = { closed: false, id: ++created,
+      captureDownload: async (targetId, trigger, options) => { log.push(["capture", guard.id, targetId, options.maxBytes]); await trigger(); return state.download; },
+      handoff: async (targetId, instructions, ms) => { log.push(["handoff", targetId, instructions, ms]); return "cf-handoff-1"; },
+      handoffState: async (targetId, handoffId) => { log.push(["handoffState", targetId, handoffId]); return state.handoff; },
+      close: () => { guard.closed = true; log.push(["close", guard.id]); } };
+    log.push(["connect", guard.id, sessionId, account.token === TOKEN]);
+    state.current = guard;
+    return guard;
+  };
+  return { log, state, factory };
+}
+
 function setup({ tokenMode = 0o600, token = TOKEN } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "agent-connectors-browser-"));
   writeFileSync(join(directory, "cf-token"), token); chmodSync(join(directory, "cf-token"), tokenMode);
-  const cli = fakeCli(), run = fakeBrowserRun(cli.browser);
+  const cli = fakeCli(), run = fakeBrowserRun(cli.browser), guards = fakeGuards();
   const store = new Store(join(directory, "state"));
   const connections = [{ id: "web", kind: "browser", owner: "@alice", settings: { accountId: ACCOUNT, tokenFile: "cf-token" } }];
-  const options = { baseDirectory: directory, directory: join(directory, "homes"), browserRun: run.api, runner: cli.runner };
+  const options = { baseDirectory: directory, directory: join(directory, "homes"), browserRun: run.api, runner: cli.runner, guard: guards.factory };
   const service = new ConnectorService({ connectors: [browserConnector(options)], connections, store, sealer: new Sealer(Buffer.alloc(32, 7)) });
-  return { ...cli, run, service, store, directory, options, connections,
+  return { ...cli, run, guards, service, store, directory, options, connections,
     cleanup: () => { store.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
 const call = (service, tool, input, caller = alice) => service.call(caller, `web__${tool}`, input, new AbortController().signal);
@@ -171,16 +188,29 @@ test("screenshots and PDFs are written to a private per-call directory and retur
   assert.deepEqual([pdf.result.files[0].name, pdf.result.files[0].mediaType], ["report.pdf", "application/pdf"]);
 });
 
-test("download fetches the link inside the page with its cookies and returns the file; private targets are refused", async (t) => {
+test("download clicks with agent-browser while the CDP guard captures the file; it is returned under the requested name", async (t) => {
   const s = setup(); t.after(s.cleanup);
   await ab(s.service, "open", "https://example.com/account");
-  const result = await ab(s.service, "download", "@e5", "invoice.pdf");
+  const result = await ab(s.service, "download", "@e5", "../invoice.pdf");
   assert.equal(result.status, "completed");
   assert.deepEqual(result.result.files.map(({ contentBase64, ...f }) => ({ ...f, text: Buffer.from(contentBase64, "base64").toString() })),
     [{ name: "invoice.pdf", mediaType: "application/pdf", size: 6, text: "%PDF-x" }]);
-  const script = s.calls.find((c) => c.args.includes("eval")).input;
-  assert.match(script, /fetch\("https:\/\/example\.com\/files\/a\.pdf", \{ credentials: "include" \}\)/, "relative links resolve against the current page");
-  assert.equal((await ab(s.service, "download", "@private", "x.pdf")).error, "browser_url_not_allowed");
+  assert.deepEqual(s.guards.log.find((e) => e[0] === "capture"), ["capture", 1, "TARGET1", 10_000_000]);
+  assert.ok(commands(s).includes("click @e5"), "the element is clicked by agent-browser");
+  assert.ok(!commands(s).some((line) => line.startsWith("download")), "agent-browser's own download is not used");
+  s.guards.state.current.closed = true;
+  const failed = await ab(s.service, "download", "@e5", "x.pdf");
+  assert.equal(failed.status, "completed", "a dropped guard is reconnected before the command runs");
+  assert.deepEqual(s.guards.log.filter((e) => e[0] === "connect").map((e) => e.slice(0, 3)), [["connect", 1, "session-1"], ["connect", 2, "session-1"]]);
+});
+
+test("no command runs when the CDP guard cannot connect", async (t) => {
+  const s = setup(); t.after(s.cleanup);
+  const service = new ConnectorService({ connectors: [browserConnector({ ...s.options, guard: async () => { throw new ConnectorError("browser_run_unavailable", { reason: "cdp_connect_failed" }); } })],
+    connections: s.connections, store: s.store, sealer: new Sealer(Buffer.alloc(32, 7)) });
+  const result = await ab(service, "open", "https://example.com/");
+  assert.deepEqual([result.status, result.error], ["failed", "browser_run_unavailable"]);
+  assert.ok(!commands(s).some((line) => line.startsWith("open")), "the navigation never ran unguarded");
 });
 
 test("upload is refused as a read, needs the owner's grant as a write, and places exactly the approved bytes", async (t) => {
@@ -247,20 +277,26 @@ test("close saves the sign-ins and disconnects; a lapsed remote browser is repla
   assert.ok(files.every((path) => !existsSync(path)), "storage files never outlive the command");
 });
 
-test("handoff gives the owner a Live View of the current tab, tracks it by id and revokes it by replacing the tab", async (t) => {
+test("handoff uses Cloudflare's structured handoff on the current tab, reports Done, and is revoked by replacing the tab", async (t) => {
   const s = setup(); t.after(s.cleanup);
   const started = await call(s.service, "handoff_start", { instructions: "Please log in", timeoutSeconds: 120 });
   assert.equal(started.status, "completed");
+  assert.equal(started.result.handoffId, "cf-handoff-1", "the id is Cloudflare's handoff id");
+  assert.equal(started.result.instructions, "Please log in");
   assert.match(started.result.liveViewUrl, /^https:\/\/live\.browser\.run\/.*TARGET1/);
   assert.deepEqual(s.run.log.find((e) => e[0] === "liveView"), ["liveView", "session-1", "TARGET1", 180_000]);
-  const status = await call(s.service, "handoff_status", { handoffId: started.result.handoffId });
-  assert.deepEqual([status.result.active, status.result.done], [true, false]);
+  assert.deepEqual(s.guards.log.find((e) => e[0] === "handoff"), ["handoff", "TARGET1", "Please log in", 120_000]);
+  const open = await call(s.service, "handoff_status", { handoffId: "cf-handoff-1" });
+  assert.deepEqual([open.result.active, open.result.done], [true, false]);
+  s.guards.state.handoff = { active: false, success: true };
+  const done = await call(s.service, "handoff_status", { handoffId: "cf-handoff-1" });
+  assert.deepEqual([done.result.active, done.result.done, done.result.success], [false, true, true], "Done in the live view completes it");
   assert.equal((await call(s.service, "handoff_status", { handoffId: "other" })).error, "browser_handoff_not_found");
   assert.equal((await call(s.service, "handoff_cancel", { handoffId: "other" })).error, "browser_handoff_not_found");
   assert.ok(!commands(s).some((line) => line.startsWith("tab close")), "an unknown handoff id closes nothing");
-  assert.equal((await call(s.service, "handoff_cancel", { handoffId: started.result.handoffId })).result.cancelled, true);
-  assert.deepEqual(commands(s).filter((line) => line.startsWith("tab ")), ["tab new", "tab close TARGET1"]);
-  assert.equal((await call(s.service, "handoff_status", { handoffId: started.result.handoffId })).error, "browser_handoff_not_found", "a cancelled handoff is forgotten");
+  assert.equal((await call(s.service, "handoff_cancel", { handoffId: "cf-handoff-1" })).result.cancelled, true);
+  assert.deepEqual(commands(s).filter((line) => line.startsWith("tab ") && !line.includes("list")), ["tab new", "tab close TARGET1"]);
+  assert.equal((await call(s.service, "handoff_status", { handoffId: "cf-handoff-1" })).error, "browser_handoff_not_found", "a cancelled handoff is forgotten");
 });
 
 test("help and the CLI's own skills run without a browser", async (t) => {

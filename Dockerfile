@@ -8,6 +8,11 @@ RUN npm ci --ignore-scripts --no-audit --no-fund \
 COPY tsconfig.json ./
 COPY src/ src/
 RUN npm run build && npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+# agent-browser's package carries every platform's binary (about 116 MB); keep only this image's, executable.
+ARG TARGETARCH
+RUN arch=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64) \
+    && find node_modules -path '*/agent-browser/bin/agent-browser-*' ! -name "agent-browser-linux-$arch" ! -name '*.js' -delete \
+    && find node_modules -path "*/agent-browser/bin/agent-browser-linux-$arch" -exec chmod 0755 {} +
 
 FROM node:24-bookworm-slim
 WORKDIR /app

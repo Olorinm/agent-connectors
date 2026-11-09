@@ -15,7 +15,14 @@ the Release notes are copied from it.
   - `screenshot`, `pdf` and `download` return files; output paths stay in a private per-call directory.
   - Cookies and local storage are saved with `state save` after every command and sealed; a new remote browser
     restores them with `state load`.
-  - Handoff uses Browser Run's Live View API for the current tab; `handoff_cancel` closes that tab.
+  - A minimal CDP connection to the same Browser Run session (Node's WebSocket, no new dependency) covers what
+    agent-browser cannot do against a remote browser: it refuses document requests to private, loopback, link-local
+    and non-http(s) addresses (including clicks, new tabs, form posts and redirects), captures downloads (links on
+    any site, form posts, script-generated files) because Browser Run keeps downloaded files on its own machine, and
+    runs Cloudflare's structured handoff.
+  - Handoff shows the instructions with Done/Failed in the live view; `handoff_status` reports `done` and `success`;
+    `handoff_cancel` closes the tab.
+  - The Docker image keeps only its platform's agent-browser binary.
 - Agent guide for the browser connector (`guides/browser.md`, command `agent-browser`).
 
 ## [0.1.0-alpha.9] - 2026-11-06

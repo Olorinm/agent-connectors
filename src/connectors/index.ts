@@ -17,4 +17,4 @@ export function builtinConnectors(options: { baseDirectory: string; stateDirecto
 export { feishuConnector, type FeishuOptions } from "./feishu/index.js";
 export { remoteConnector } from "./remote/index.js";
 export { googleConnector, type GoogleOptions } from "./google/index.js";
-export { browserConnector, CloudflareBrowserRun, type AgentBrowserRunner, type BrowserOptions, type BrowserRun } from "./browser/index.js";
+export { browserConnector, CloudflareBrowserRun, type AgentBrowserRunner, type BrowserGuard, type BrowserOptions, type BrowserRun, type GuardFactory } from "./browser/index.js";

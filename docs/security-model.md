@@ -215,11 +215,29 @@ and the checked URL is what the CLI receives. Output paths (`screenshot`, `pdf`,
 in a private per-call directory; only the requested file name is kept, the files are returned and the directory is
 deleted.
 
-Two commands are implemented with fixed page scripts because a remote browser has no access to this host's files:
-`download <link> <name>` fetches the link's URL inside the page with its cookies (same origin, or CORS-enabled; at
-most 10 MB; the final URL is checked again), and `upload` lets agent-browser select the file input and name the
-files, then places the approved bytes into that input. These scripts are part of this service; Agent input is passed
-to them only as JSON values.
+Next to agent-browser the connector keeps one minimal Chrome DevTools Protocol connection to the same Browser Run
+session (`src/connectors/browser/cdp.ts`, Node's built-in WebSocket, the token only in its Authorization header). It
+covers what agent-browser cannot do against a remote browser; it is not a second automation path:
+
+- **Navigation guard.** Every document request in the browser is paused (`Fetch`, browser-wide, so new tabs and
+  redirect hops are included) and failed with `BlockedByClient` when its URL is not http(s), carries credentials, or
+  targets a loopback, private, link-local or `.internal` host. This applies to clicks, `click --new-tab`, form posts,
+  script navigations and redirects, not only to URLs the Agent types. Commands do not run unless the guard is
+  connected; a dropped connection is restored before the next command. Subresources (images, scripts, fetch/XHR) are
+  not intercepted, matching the earlier connector.
+- **Downloads.** Browser Run saves a download on its own machine and blocks reading it back, so agent-browser's
+  `download` cannot deliver the file. For `download <element> <name>` agent-browser clicks the element while the
+  guard, for that command only, also pauses document responses: an attachment (or any non-HTML document) is read with
+  `Fetch.getResponseBody`, answered with an empty 204 so the page stays, and returned (links on any site, form posts,
+  redirects checked hop by hop). Script-generated downloads (`blob:`/`data:` URLs) are read inside the page, through a
+  small hook that keeps created blobs readable after the page revokes their URL; the remote download is cancelled. At
+  most 10 MB.
+- **Structured handoff.** `Cloudflare.handoff` shows the Agent's instructions with Done/Failed buttons in the live
+  view; `handoff_status` reads `Cloudflare.getHandoffState` and the `Cloudflare.handoffComplete` outcome.
+
+`upload` lets agent-browser select the file input and name the files, then a fixed page script places the approved
+bytes into that input, because the remote browser cannot read this host's files. Page scripts are part of this
+service; Agent input reaches them only as JSON values.
 
 **Deliberate exception to "anything with an external effect is a write".** By product decision, matching how
 comparable assistants behave, navigation, clicks, typing, `screenshot`, `pdf` and `download` run without approval,
@@ -229,8 +247,11 @@ from the approved `site`. Treat a browser connection as trusted with everything 
 store sign-ins for banking, payment or accounts where an unattended click is unacceptable.
 
 `handoff_start` returns a Live View URL of the current tab that grants control of the browser until it expires. It
-is meant for the owner only, so a composer must deliver it to the owner directly, not to the model.
-`handoff_cancel` revokes it by closing that tab.
+is meant for the owner only, so a composer must deliver it to the owner directly, not to the model. The owner ends it
+with Done or Failed; `handoff_cancel` revokes it by closing that tab.
+
+agent-browser's npm package carries every platform's native binary (about 116 MB). Images keep only their own
+platform's binary (the Dockerfile deletes the others and marks it executable; about 18 MB for linux-x64).
 
 ## HTTP
 

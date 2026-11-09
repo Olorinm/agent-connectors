@@ -45,15 +45,17 @@ agent-browser snapshot -i                # refs change when the page changes; ta
   `set headers|credentials`, `connect`, `close --all`, `install`, `batch`, `stream`, `dashboard`. Do not try to read
   cookies or tokens from pages.
 - Files: `screenshot`, `pdf` and `download` save into `browser_downloads/` in your working directory and print
-  the saved path. `download <link> <name>` fetches the link's URL with the browser's
-  sign-ins (same site, or sites that allow it).
+  the saved path. `download <element> <name>` clicks the element and captures what it downloads: a link (also on
+  another site), a form that posts a download, or a file a script generates.
 - Local and private addresses (`localhost`, `10.x`, `192.168.x`, metadata endpoints) and non-http(s) URLs are
-  refused.
+  refused, also when a click, a new tab or a redirect leads there (the page shows "blocked").
 - `close` disconnects and keeps the sign-ins; the next command reconnects.
 
 ## When the owner must take over
 
 For a login, CAPTCHA or a choice only the owner can make, call the `connected_apps` tool with the browser
 connection's `handoff_start` operation (`instructions`, optional `timeoutSeconds`). The owner privately receives a
-live view of the current tab; you receive only the handoff ID. Wait for the owner to say they are done, then run
-`agent-browser snapshot -i` again: the page may have changed. `handoff_status` and `handoff_cancel` check or end it.
+live view of the current tab with your instructions and Done/Failed buttons; you receive only the handoff ID. Check
+`handoff_status` every so often (or when the owner says they are done): `done: true` with `success` tells you they
+pressed Done or Failed. Then run `agent-browser snapshot -i` again: the page may have changed. `handoff_cancel` ends
+it early.

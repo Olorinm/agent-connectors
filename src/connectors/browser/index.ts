@@ -5,11 +5,13 @@ import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { Json } from "../../canonical.js";
 import { ConnectorError, type ConnectionConfig, type Connector, type ToolContext, type ToolDefinition } from "../../connector.js";
+import { connectGuard, type BrowserGuard, type GuardFactory } from "./cdp.js";
 import { parseCommand, shellLine, type Command } from "./command.js";
-import { CloudflareBrowserRun, agentBrowserBinary, allowedUrl, cdpEndpoint, runAgentBrowser, type AgentBrowserRunner, type BrowserRun, type BrowserRunAccount, type CliResult } from "./runtime.js";
+import { CloudflareBrowserRun, agentBrowserBinary, cdpEndpoint, runAgentBrowser, type AgentBrowserRunner, type BrowserRun, type BrowserRunAccount, type CliResult } from "./runtime.js";
 
 export { CloudflareBrowserRun, agentBrowserBinary, runAgentBrowser, type AgentBrowserRunner, type BrowserRun, type CliResult } from "./runtime.js";
 export { parseCommand } from "./command.js";
+export { connectGuard, type BrowserGuard, type GuardFactory } from "./cdp.js";
 
 const MAX_FILES_BYTES = 10_000_000;
 const MAX_UPLOAD_BASE64 = 14_000_000;
@@ -41,10 +43,12 @@ export interface BrowserOptions {
   /** Dependency injection for tests; production uses Cloudflare Browser Run and the pinned agent-browser binary. */
   browserRun?: BrowserRun;
   runner?: AgentBrowserRunner;
+  /** The minimal CDP client for the navigation guard, downloads and structured handoff. */
+  guard?: GuardFactory;
   keepAliveMs?: number;
 }
 
-interface Attached { sessionId: string; home: string; token: string; usedAt: number; verify: boolean }
+interface Attached { sessionId: string; home: string; token: string; usedAt: number; verify: boolean; guard?: BrowserGuard; idle?: NodeJS.Timeout }
 interface Run { account: BrowserRunAccount; session: Attached; saved: State; context: ToolContext }
 
 /**
@@ -59,6 +63,7 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
   let root: string | undefined;
   const directory = () => root ??= options.directory ?? mkdtempSync(join(tmpdir(), "acb-"));
   const runner = options.runner ?? runAgentBrowser(() => agentBrowserBinary(directory()));
+  const guards = options.guard ?? connectGuard;
   const queues = new Map<string, Promise<unknown>>();
   const sessions = new Map<string, Attached>();
   const homes = new Map<string, string>();
@@ -98,6 +103,8 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
       timeout: COMMAND_TIMEOUT_MS, signal: run.context.signal, ...(input === undefined ? {} : { input }) });
   /** Stops the local agent-browser daemon. The remote browser keeps running until its keep-alive ends. */
   const stop = async (session: Attached, signal: AbortSignal) => {
+    clearTimeout(session.idle);
+    session.guard?.close();
     await runner(["close"], { cwd: join(session.home, "work"), env: environment(session.home), timeout: 30_000, signal }).catch(() => undefined);
   };
   const load = async (context: ToolContext): Promise<State> => {
@@ -110,7 +117,11 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
   const attach = async (context: ToolContext, saved: State, current: BrowserRunAccount): Promise<Attached> => {
     const id = context.connection.id, token = createHash("sha256").update(current.token).digest("hex");
     const live = sessions.get(id);
-    if (live && live.sessionId === saved.sessionId && live.token === token && !live.verify && Date.now() - live.usedAt < keepAliveMs - 60_000) return live;
+    if (live && live.sessionId === saved.sessionId && live.token === token && !live.verify && Date.now() - live.usedAt < keepAliveMs - 60_000) {
+      // No command runs unguarded: a dropped CDP connection is restored first.
+      if (!live.guard || live.guard.closed) live.guard = await guards(current, live.sessionId, context.signal);
+      return live;
+    }
     if (live) { sessions.delete(id); await stop(live, context.signal); }
     const home = homeOf(id);
     // A daemon from an earlier attachment would keep its old connection settings.
@@ -129,6 +140,8 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
     // The daemon serves a local screencast by default; this service never uses it.
     const started = await cli(run, ["stream", "disable"]);
     if (started.code !== 0) { await stop(session, context.signal); throw new ConnectorError("browser_run_unavailable", { output: text(started).slice(0, 2000) }); }
+    try { session.guard = await guards(current, session.sessionId, context.signal); }
+    catch (error) { await stop(session, context.signal); throw error; }
     sessions.set(id, session);
     if (session.sessionId !== saved.sessionId) await save(context, { ...(await load(context)), sessionId: session.sessionId });
     return session;
@@ -147,6 +160,14 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
         return await work(run);
       } finally {
         session.usedAt = Date.now();
+        // An idle connection is released, so the remote browser can end with its keep-alive.
+        clearTimeout(session.idle);
+        session.idle = setTimeout(() => {
+          if (sessions.get(id) !== session) return;
+          sessions.delete(id);
+          void stop(session, AbortSignal.timeout(30_000));
+        }, Math.max(keepAliveMs - 60_000, 1_000));
+        session.idle.unref();
         // Persist what the browser now holds (for example a sign-in the owner just completed), merged with what the tool saved.
         if (!inspect && sessions.get(id) === session) await persist(run).catch(() => { session.verify = true; });
       }
@@ -196,24 +217,19 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
     return result.stdout.trim();
   };
   /**
-   * Browser Run keeps a browser's downloads on its own machine, so agent-browser's `download` cannot deliver them.
-   * Instead the link's URL is fetched inside the page with its cookies (same origin, or sites that allow it).
+   * Browser Run keeps a browser's downloads on its own machine and blocks reading them back, so agent-browser's
+   * `download` cannot deliver the file. agent-browser clicks the element; the CDP guard captures what it downloads.
    */
   const download = async (run: Run, command: Command, call: string): Promise<Json> => {
-    const href = await cli(run, ["get", "attr", command.selector!, "href"]);
-    if (href.code !== 0 || !href.stdout.trim() || href.stdout.trim() === "null") throw new ConnectorError("browser_download_needs_link", { output: text(href) });
-    const url = allowedUrl(new URL(href.stdout.trim(), await currentUrl(run)).href);
-    const result = await cli(run, ["--json", "eval", "--stdin"], fetchScript(url, MAX_FILES_BYTES));
-    const value = z.object({ data: z.object({ result: z.object({ url: z.string().optional(), type: z.string().optional(),
-      base64: z.string().optional(), error: z.string().optional() }) }) }).safeParse(jsonOutput(result.stdout)).data?.data.result;
-    if (result.code !== 0 || !value || value.error || value.base64 === undefined)
-      throw new ConnectorError("browser_download_failed", { reason: value?.error ?? "fetch_failed" });
-    allowedUrl(value.url ?? url);
-    const name = command.outputs[0]!.name, bytes = Buffer.from(value.base64, "base64");
-    if (bytes.length > MAX_FILES_BYTES) throw new ConnectorError("browser_download_too_large");
+    const guard = run.session.guard;
+    if (!guard || guard.closed) { run.session.verify = true; throw new ConnectorError("browser_run_unavailable", { reason: "cdp_closed" }); }
+    const file = await guard.captureDownload(await activeTarget(run), async () => {
+      const clicked = await cli(run, ["click", command.selector!]);
+      if (clicked.code !== 0) throw new ConnectorError("agent_browser_failed", { exitCode: clicked.code, output: text(clicked) });
+    }, { maxBytes: MAX_FILES_BYTES, timeoutMs: 60_000 });
+    const name = command.outputs[0]!.name, bytes = Buffer.from(file.contentBase64, "base64");
     writeFileSync(join(call, name), bytes, { mode: 0o600 });
-    return { exitCode: 0, output: `✓ Downloaded ${name} (${bytes.length} bytes)`,
-      files: collect(call, [name], (value.type ?? "").split(";")[0]!.trim() || undefined) };
+    return { exitCode: 0, output: `✓ Downloaded ${name} (${bytes.length} bytes)`, files: collect(call, [name], file.mediaType) };
   };
   /**
    * A remote browser cannot read files on this host, so agent-browser's own `upload` only selects the file input and
@@ -269,24 +285,35 @@ export function browserConnector(options: BrowserOptions = {}): Connector {
 
   const tools: ToolDefinition[] = [read, write,
     { name: "handoff_start", risk: "read",
-      description: "Ask the owner to take over the browser (login, CAPTCHA, a choice only they can make). Returns a Live View URL of the current tab " +
-        "for the owner only; never repeat it to anyone else. The owner tells you when they are done; then take a new snapshot: the page may have changed.",
+      description: "Ask the owner to take over the browser (login, CAPTCHA, a choice only they can make). The owner gets a Live View of the current tab " +
+        "with your instructions and Done/Failed buttons; the URL is for the owner only, never repeat it to anyone else. Poll handoff_status until done, " +
+        "then take a new snapshot: the page may have changed.",
       input: z.object({ instructions: z.string().min(1).max(500), timeoutSeconds: z.number().int().min(60).max(MAX_HANDOFF_MS / 1000).default(900) }).strict(),
       execute: (context, value: { instructions: string; timeoutSeconds: number }) => locked(context, async (run) => {
+        const guard = run.session.guard;
+        if (!guard || guard.closed) throw new ConnectorError("browser_run_unavailable", { reason: "cdp_closed" });
         const targetId = await activeTarget(run);
         const liveViewUrl = await api.liveView(run.account, run.session.sessionId, targetId, Math.min(value.timeoutSeconds * 1000 + 60_000, 3_600_000), context.signal);
-        const handoff = { handoffId: randomUUID(), targetId, expiresAt: new Date(Date.now() + value.timeoutSeconds * 1000).toISOString() };
+        // Cloudflare's structured handoff: the banner with the instructions and Done/Failed in the live view.
+        const handoffId = await guard.handoff(targetId, value.instructions, value.timeoutSeconds * 1000);
+        const handoff = { handoffId, targetId, expiresAt: new Date(Date.now() + value.timeoutSeconds * 1000).toISOString() };
         await save(context, { ...(await load(context)), handoff });
-        return { handoffId: handoff.handoffId, liveViewUrl, expiresAt: handoff.expiresAt, instructions: value.instructions };
+        return { handoffId, liveViewUrl, expiresAt: handoff.expiresAt, instructions: value.instructions };
       }) },
-    { name: "handoff_status", risk: "read", description: "Check whether a handoff is still open (its tab exists and it has not expired), with the current page.",
+    { name: "handoff_status", risk: "read",
+      description: "Check a handoff: done becomes true when the owner presses Done or Failed (success says which, when known), the time runs out or the tab is gone.",
       input: z.object({ handoffId: z.string().max(100) }).strict(),
       execute: (context, value: { handoffId: string }) => locked(context, async (run) => {
         const handoff = (await load(context)).handoff;
-        if (handoff?.handoffId !== value.handoffId) throw new ConnectorError("browser_handoff_not_found");
+        if (handoff?.handoffId !== value.handoffId || !handoff.targetId) throw new ConnectorError("browser_handoff_not_found");
+        const guard = run.session.guard;
+        if (!guard || guard.closed) throw new ConnectorError("browser_run_unavailable", { reason: "cdp_closed" });
         const expired = Date.parse(handoff.expiresAt) <= Date.now();
-        const open = !expired && handoff.targetId !== undefined && await api.target(run.account, run.session.sessionId, handoff.targetId, context.signal);
-        return { handoffId: value.handoffId, active: open, done: !open, ...(expired ? { reason: "expired" } : {}), url: await currentUrl(run) };
+        const exists = await api.target(run.account, run.session.sessionId, handoff.targetId, context.signal);
+        const state = exists ? await guard.handoffState(handoff.targetId, value.handoffId) : { active: false };
+        const active = !expired && state.active;
+        return { handoffId: value.handoffId, active, done: !active, ...(state.success !== undefined ? { success: state.success } : {}),
+          ...(state.reason ? { reason: state.reason } : expired ? { reason: "expired" } : !exists ? { reason: "tab_closed" } : {}), url: await currentUrl(run) };
       }) },
     { name: "handoff_cancel", risk: "read",
       description: "End the current handoff: the owner's live view stops controlling the browser (its tab is replaced by a blank one).",
@@ -362,22 +389,6 @@ function sniff(bytes: Buffer) {
   if (bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
   if (bytes.subarray(0, 5).toString("latin1") === "%PDF-") return "application/pdf";
   return undefined;
-}
-
-/** Fixed page script (never Agent-supplied): fetch one URL with the page's cookies and return its bytes. */
-function fetchScript(url: string, max: number) {
-  return `(async () => {
-  try {
-    const response = await fetch(${JSON.stringify(url)}, { credentials: "include" });
-    if (!response.ok) return { error: "status_" + response.status };
-    if (Number(response.headers.get("content-length") || 0) > ${max}) return { error: "too_large" };
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length > ${max}) return { error: "too_large" };
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += 32768) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768));
-    return { url: response.url, type: response.headers.get("content-type") || "", base64: btoa(binary) };
-  } catch { return { error: "fetch_failed" }; }
-})()`;
 }
 
 /** Fixed page script: replace the files agent-browser named in exactly one file input with the approved bytes. */

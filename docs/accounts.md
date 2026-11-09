@@ -200,9 +200,9 @@ agent-browser CLI inside this service, attached to the connection's Browser Run 
 
 | Tool | Risk | Input |
 | --- | --- | --- |
-| `agent_browser_read` | read | `args`: an agent-browser argument list, e.g. `["snapshot","-i"]`. Navigation, snapshots, `get`/`is`/`find`/`wait`, clicks, typing, keys, `screenshot`, `pdf`, `download`, `close`, `--help` and `skills` |
+| `agent_browser_read` | read | `args`: an agent-browser argument list, e.g. `["snapshot","-i"]`. Navigation, snapshots, `get`/`is`/`find`/`wait`, clicks, typing, keys, `screenshot`, `pdf`, `download <element> <name>`, `close`, `--help` and `skills` |
 | `agent_browser_write` | write | `args` (`["upload","<file input>","<name>",…]`), `site` (the current page's https origin) and `files` (name, media type, base64) |
-| `handoff_start`, `handoff_status`, `handoff_cancel` | read | Live View of the current tab for the owner |
+| `handoff_start`, `handoff_status`, `handoff_cancel` | read | Live View of the current tab with Cloudflare's instructions banner and Done/Failed; `handoff_status` reports `done` and `success` |
 
 `agent_browser_read` refuses `upload` with `agent_browser_command_requires_write_tool`, every command outside its
 allowlist with `agent_browser_command_not_allowed`, and every global flag except `--json` with
@@ -210,9 +210,13 @@ allowlist with `agent_browser_command_not_allowed`, and every global flag except
 the composing product stores them. See [browser security](security-model.md#browser-cloudflare-browser-run) for the
 allowlist and why clicks are not writes here.
 
+The connection also keeps a minimal CDP connection to the same session for the navigation guard, downloads and the
+structured handoff; see [browser security](security-model.md#browser-cloudflare-browser-run).
+
 The package contains agent-browser's binaries for every platform. Its install script only marks the binary
 executable (and rewrites a global npm link when one exists), so it is denied in `allowScripts`; the connector runs
-the binary directly when it is executable and otherwise copies it once into its private directory.
+the binary directly when it is executable and otherwise copies it once into its private directory. Images keep only
+their platform's binary, executable (see `Dockerfile`).
 
 Only exact names in the code-reviewed catalog are exposed. New upstream tools remain unavailable until reviewed.
 Upstream schemas validate input without transforming it. Google schemas apply documented defaults before the exact
