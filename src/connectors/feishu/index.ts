@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { Json } from "../../canonical.js";
 import { ConnectorError, type ConnectionConfig, type Connector, type OperationCatalog, type ToolDefinition } from "../../connector.js";
 import { FeishuAccount, feishuApplicationSchema, installFeishuApplication, loadFeishuCredentials, runOfficialCli, type CliResult, type CliRunner } from "./account.js";
-import { ArgumentsError, UnconfiguredCli, checkArguments, guidanceArgs, withFlags } from "./classify.js";
+import { ArgumentsError, UnconfiguredCli, checkArguments, guidanceArgs, withFlags, type Classification } from "./classify.js";
 
 const MAX_FILES_BYTES = 20_000_000;
 const MAX_ARTIFACT_BYTES = 10_000_000;
@@ -76,11 +76,29 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
   };
   let unconfigured: UnconfiguredCli | undefined;
   const cli = () => (unconfigured ??= new UnconfiguredCli(options.classifierDirectory ?? mkdtempSync(join(tmpdir(), "agent-connectors-lark-")), options.runner ?? runOfficialCli));
+  // A command's declared risk depends only on its arguments; the policy check and the run ask the CLI once.
+  const classified = new Map<string, Promise<Classification>>();
+  const classify = (args: string[]) => {
+    const key = JSON.stringify(args);
+    let result = classified.get(key);
+    if (!result) {
+      if (classified.size >= 200) classified.delete(classified.keys().next().value!);
+      result = cli().classify(args);
+      classified.set(key, result);
+      result.catch(() => classified.delete(key));
+    }
+    return result;
+  };
 
   const read: ToolDefinition<Input> = {
     name: "cli_read", risk: "read", input, operations: operationsOf("read"),
-    // Guidance (skills, schema, --help) runs on an unconfigured CLI and reads nothing of the owner's.
-    operation: (_context, value) => guidanceArgs(value.args) ? null : feishuOperation(value.args, "read"),
+    // Guidance (skills, schema, --help) runs on an unconfigured CLI and reads nothing of the owner's. A command the CLI
+    // does not declare read is the group's write: refused here pointing to cli_write, unless that write is denied.
+    operation: async (_context, value) => {
+      if (guidanceArgs(value.args)) return null;
+      check(value.args);
+      return feishuOperation(value.args, (await classify(value.args)).risk === "read" ? "read" : "write");
+    },
     description: "Run an official lark-cli command for the owner's Feishu that only reads (declared Risk: read, and every request in its dry-run plan reads), or guidance: " +
       "`skills read <name>`, `schema <service.resource.method>`, `<domain> --help`. Pass argument strings without the executable or shell syntax. " +
       "Commands the CLI marks write or high-risk-write are refused here; use cli_write. Do not pass --as or --profile. " +
@@ -93,7 +111,7 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
       }
       check(value.args);
       // Two independent checks: the CLI's declared risk, and the requests its dry-run would send.
-      const { risk, command } = await cli().classify(value.args);
+      const { risk, command } = await classify(value.args);
       if (risk !== "read") throw new ConnectorError("feishu_command_requires_write_tool", { command, risk: risk ?? "unknown" });
       const plan = await cli().plan(value.args);
       if (!plan.readOnly) throw new ConnectorError("feishu_command_requires_write_tool", { command, risk, requests: plan.requests });
@@ -110,7 +128,7 @@ export function feishuConnector(options: FeishuOptions = {}): Connector {
     async execute({ connection }, value) {
       check(value.args);
       // The owner approved these exact arguments, so a high-risk command receives its confirmation here.
-      const { risk } = await cli().classify(value.args);
+      const { risk } = await classify(value.args);
       const flags = risk === "high-risk-write" && !value.args.includes("--yes") ? ["--yes=true"] : [];
       return withSecrets(() => run(account(connection), value, { write: true, flags }));
     },
