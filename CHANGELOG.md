@@ -4,6 +4,20 @@ Notable changes to Agent Connectors, newest first. Each version has a GitHub Rel
 notes and the package archive. When releasing, add the new section here in the version-bump commit;
 the Release notes are copied from it.
 
+## [Unreleased]
+
+- Browser connector runs the official agent-browser CLI (`agent-browser` 0.41.2, pinned) against Cloudflare Browser
+  Run, replacing the Playwright tools (`open`, `snapshot`, `click`, `type`, `press`, `screenshot`, `download`,
+  `upload`, `close`). `playwright-core` is no longer a dependency.
+  - `agent_browser_read` takes agent-browser arguments and runs an allowlist of commands; credentials, page
+    JavaScript, traffic interception, other browsers and global flags other than `--json` are refused.
+  - `agent_browser_write` runs `upload`, approved per file and site.
+  - `screenshot`, `pdf` and `download` return files; output paths stay in a private per-call directory.
+  - Cookies and local storage are saved with `state save` after every command and sealed; a new remote browser
+    restores them with `state load`.
+  - Handoff uses Browser Run's Live View API for the current tab; `handoff_cancel` closes that tab.
+- Agent guide for the browser connector (`guides/browser.md`, command `agent-browser`).
+
 ## [0.1.0-alpha.9] - 2026-11-06
 
 - Feishu owner tools on a product-provided app (the same app a chat channel's bot uses).
