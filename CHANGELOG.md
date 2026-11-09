@@ -4,7 +4,7 @@ Notable changes to Agent Connectors, newest first. Each version has a GitHub Rel
 notes and the package archive. When releasing, add the new section here in the version-bump commit;
 the Release notes are copied from it.
 
-## [Unreleased]
+## [0.1.0-alpha.11] - 2026-11-09
 
 - Owner operation policy per connection: every operation can be set to `allow` (runs directly, writes included),
   `ask` (approval for every call, reads included) or `deny` (not listed and refused with
