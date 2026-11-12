@@ -1,5 +1,7 @@
 # Agent Connectors
 
+> **Moved.** This package now lives in [Olorinm/agent-kit](https://github.com/Olorinm/agent-kit) under `packages/connectors`, with its history. This repository is archived and no longer updated.
+
 Business connectors for Agents — GitHub, Google Workspace, Feishu and Notion — exposed as MCP tools,
 with credentials and authorization kept outside the Agent's environment.
 

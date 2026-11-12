@@ -1,5 +1,7 @@
 # Agent Connectors
 
+> **Moved.** This package now lives in [Olorinm/agent-kit](https://github.com/Olorinm/agent-kit) under `packages/connectors`, with its history. This repository is archived and no longer updated.
+
 给 Agent 用的 GitHub、Google Workspace、飞书和 Notion 业务连接器，以 MCP 工具提供。凭证和授权都放在 Agent 环境之外。
 
 - **凭证不进沙箱。** 生产配置使用 AES-256-GCM 和 Google Cloud KMS 信封加密：OAuth 令牌保存在加密数据库字段中，应用配置和飞书 CLI 文件保存在加密文件包中，运行时只解密到私有内存目录。
